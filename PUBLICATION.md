@@ -7,3 +7,5 @@ It does not include runtime binaries, Steam/client/game payloads, local runtime 
 The root MIT license applies to Macroton-authored material. Third-party source excerpts and patch files require separate provenance and license review before publication.
 
 Building the launcher requires a MinGW-w64 x86_64 compiler because Cargo builds the Macroton-authored Steam CEF helper from source and embeds that generated output. Set `MINGW64_CC` if the compiler is not `x86_64-w64-mingw32-gcc`.
+
+Experimental patch-based build scripts are withheld with their upstream-derived patch sets pending license review. The baseline Wine build scripts remain included.
