@@ -94,4 +94,3 @@ manifest="${staging}/share/macroton/components/dxmt-${version}.conf"
 mv "${staging}" "${destination}"
 echo "Composed Wine + DXMT ${version} runtime: ${destination}"
 echo "Component manifest: ${destination}/share/macroton/components/dxmt-${version}.conf"
-
