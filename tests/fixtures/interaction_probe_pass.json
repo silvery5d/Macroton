@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "window_id": 44774,
+  "pid": 4242,
+  "action_kind": "key",
+  "action_value": "escape",
+  "delay_ms": 500,
+  "width": 1280,
+  "height": 720,
+  "before_png_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "after_png_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "before_sampled_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "after_sampled_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "before_luma": 65.7,
+  "after_luma": 72.1,
+  "sampled_pixels": 1000,
+  "changed_pixels": 250,
+  "changed_ratio": 0.25,
+  "frontmost_before": true,
+  "frontmost_after": true,
+  "owner_match_before": true,
+  "owner_match_after": true
+}

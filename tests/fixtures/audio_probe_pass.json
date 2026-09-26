@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "window_id": 44774,
+  "pid": 69369,
+  "duration_seconds": 3.0,
+  "sample_rate": 48000.0,
+  "channels": 2,
+  "buffers": 159,
+  "frames": 152640,
+  "rms_dbfs": -49.06549777482763,
+  "peak_dbfs": -46.00484095893127,
+  "silence_threshold_dbfs": -50.0,
+  "non_silent_buffers": 157,
+  "non_silent_ratio": 0.9874213836477987,
+  "invalid_buffers": 0,
+  "format_changes": 0,
+  "owner_match": true
+}

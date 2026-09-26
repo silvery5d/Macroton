@@ -1,0 +1,5 @@
+frame,elapsed_ms,frontmost,average_luma,sampled_sha256,window_id,pid
+0,0.000,true,65.700000,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,44774,4242
+1,16.667,true,65.710000,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,44774,4242
+2,33.334,true,65.690000,cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,44774,4242
+3,50.001,true,65.705000,dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd,44774,4242

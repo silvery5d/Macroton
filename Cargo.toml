@@ -1,0 +1,21 @@
+[package]
+name = "macroton"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "An evidence-first launcher core for preserving legacy Steam games on macOS"
+
+[dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+
+[lib]
+name = "macroton"
+path = "src/lib.rs"
+
+[[bin]]
+name = "macroton"
+path = "src/main.rs"
+
+[profile.release]
+strip = true
+lto = "thin"
