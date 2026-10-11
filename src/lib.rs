@@ -11,6 +11,7 @@ pub mod profile;
 pub mod runtime;
 pub mod sha1;
 pub mod sha256;
+pub mod shared_client;
 pub mod steam;
 pub mod steam_appinfo;
 pub mod steam_bootstrap;

@@ -65,10 +65,21 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub fn inspect(app_id: u32, data_root: &Path) -> Result<LaunchStatus, Error> {
+    inspect_in_client(app_id, app_id, data_root)
+}
+
+/// Inspect one game's events in the Steam client owned by another AppID.
+/// The launch boundary belongs to the game; processes belong to the client
+/// prefix. Callers must first verify the exact live client provenance.
+pub fn inspect_in_client(
+    app_id: u32,
+    client_app_id: u32,
+    data_root: &Path,
+) -> Result<LaunchStatus, Error> {
     let app_root = data_root.join("games").join(app_id.to_string());
     let steam_root = data_root
         .join("games")
-        .join(app_id.to_string())
+        .join(client_app_id.to_string())
         .join("prefix/drive_c/Program Files (x86)/Steam");
     let boundary = fs::read_to_string(app_root.join(LAUNCH_BOUNDARY_FILE))
         .ok()
@@ -80,7 +91,7 @@ pub fn inspect(app_id: u32, data_root: &Path) -> Result<LaunchStatus, Error> {
     // host-side observation rather than reporting a live game as absent.  A
     // unique executable is required; ambiguity remains fail-closed.
     if status.state != LaunchState::Exited && boundary.is_some() {
-        let resources = stop::inspect_resources(app_id, data_root).map_err(|error| Error {
+        let resources = stop::inspect_resources(client_app_id, data_root).map_err(|error| Error {
             message: format!("cannot map Steam's Windows PID to the exact prefix: {error}"),
         })?;
         let expected_executable = status
@@ -132,19 +143,29 @@ pub fn inspect_steam_root(app_id: u32, steam_root: &Path) -> Result<LaunchStatus
 /// request. Managed `launch-status` reads only events appended after this
 /// boundary, so a prior run cannot masquerade as the current result.
 pub fn record_launch_boundary(app_id: u32, data_root: &Path) -> Result<(), Error> {
+    record_launch_boundary_in_client(app_id, app_id, data_root)
+}
+
+/// Record the target game's log offsets in an already selected Steam client.
+pub fn record_launch_boundary_in_client(
+    app_id: u32,
+    client_app_id: u32,
+    data_root: &Path,
+) -> Result<(), Error> {
     let app_root = data_root.join("games").join(app_id.to_string());
+    let client_root = data_root.join("games").join(client_app_id.to_string());
     fs::create_dir_all(&app_root).map_err(|error| Error {
         message: format!("cannot create launch boundary directory: {error}"),
     })?;
     let console_log =
-        app_root.join("prefix/drive_c/Program Files (x86)/Steam/logs/console_log.txt");
-    let diagnostic_log = app_root.join("steam-client.log");
+        client_root.join("prefix/drive_c/Program Files (x86)/Steam/logs/console_log.txt");
+    let diagnostic_log = client_root.join("steam-client.log");
     for (boundary_file, log_path) in [
         (LAUNCH_BOUNDARY_FILE, console_log),
         (LAUNCH_DIAGNOSTIC_BOUNDARY_FILE, diagnostic_log),
         (
             LAUNCH_GAMEPROCESS_BOUNDARY_FILE,
-            app_root.join("prefix/drive_c/Program Files (x86)/Steam/logs/gameprocess_log.txt"),
+            client_root.join("prefix/drive_c/Program Files (x86)/Steam/logs/gameprocess_log.txt"),
         ),
     ] {
         let offset = fs::metadata(&log_path)
@@ -155,6 +176,44 @@ pub fn record_launch_boundary(app_id: u32, data_root: &Path) -> Result<(), Error
         })?;
     }
     Ok(())
+}
+
+/// Conservative recovery gate: a failed or delayed protocol request can be
+/// abandoned only if neither Steam log observed a target game process after
+/// this request's recorded boundary.
+pub fn game_process_ever_observed_in_client(
+    app_id: u32,
+    client_app_id: u32,
+    data_root: &Path,
+) -> Result<bool, Error> {
+    let app_root = data_root.join("games").join(app_id.to_string());
+    let client_root = data_root.join("games").join(client_app_id.to_string());
+    let checks = [
+        (
+            LAUNCH_BOUNDARY_FILE,
+            client_root.join("prefix/drive_c/Program Files (x86)/Steam/logs/console_log.txt"),
+            format!("Game process added : AppID {app_id}"),
+        ),
+        (
+            LAUNCH_GAMEPROCESS_BOUNDARY_FILE,
+            client_root.join("prefix/drive_c/Program Files (x86)/Steam/logs/gameprocess_log.txt"),
+            format!("AppID {app_id} adding PID"),
+        ),
+    ];
+    for (boundary_name, log_path, marker) in checks {
+        let offset: usize = fs::read_to_string(app_root.join(boundary_name))
+            .map_err(|error| Error { message: format!("cannot read shared launch boundary: {error}") })?
+            .trim().parse().map_err(|_| Error { message: "invalid shared launch boundary".to_owned() })?;
+        let contents = fs::read(&log_path)
+            .map_err(|error| Error { message: format!("cannot read shared Steam log {}: {error}", log_path.display()) })?;
+        if contents.len() < offset {
+            return Err(Error { message: format!("shared Steam log was truncated: {}", log_path.display()) });
+        }
+        if String::from_utf8_lossy(&contents[offset..]).contains(&marker) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn inspect_steam_root_with_offset(
@@ -425,6 +484,39 @@ mod tests {
         let status = inspect(42, &temp.0).unwrap();
         assert_eq!(status.state, LaunchState::WaitingEula);
         assert!(status.latest_event.unwrap().contains("ShowEula"));
+    }
+
+    #[test]
+    fn shared_client_boundary_tracks_target_events_in_resident_log() {
+        let temp = TempDir::new();
+        let steam = temp.0.join("games/100/prefix/drive_c/Program Files (x86)/Steam");
+        fs::create_dir_all(steam.join("logs")).unwrap();
+        fs::write(steam.join("logs/console_log.txt"),
+            "Game process removed: AppID 200 old.exe, ProcID 1\n").unwrap();
+        record_launch_boundary_in_client(200, 100, &temp.0).unwrap();
+        fs::OpenOptions::new().append(true)
+            .open(steam.join("logs/console_log.txt")).unwrap()
+            .write_all(b"Game process added : AppID 200 game.exe, ProcID 2, IP 0.0.0.0:0\nGame process removed: AppID 200 game.exe, ProcID 2\n")
+            .unwrap();
+        let status = inspect_in_client(200, 100, &temp.0).unwrap();
+        assert_eq!(status.state, LaunchState::Exited);
+        assert_eq!(status.steam_root, steam);
+        assert_eq!(status.steam_process_id, Some(2));
+    }
+
+    #[test]
+    fn shared_recovery_rejects_any_observed_target_game_after_boundary() {
+        let temp = TempDir::new();
+        let steam = temp.0.join("games/100/prefix/drive_c/Program Files (x86)/Steam");
+        fs::create_dir_all(steam.join("logs")).unwrap();
+        fs::write(steam.join("logs/console_log.txt"), "old AppID 200 event\n").unwrap();
+        fs::write(steam.join("logs/gameprocess_log.txt"), "").unwrap();
+        record_launch_boundary_in_client(200, 100, &temp.0).unwrap();
+        assert!(!game_process_ever_observed_in_client(200, 100, &temp.0).unwrap());
+        fs::OpenOptions::new().append(true)
+            .open(steam.join("logs/gameprocess_log.txt")).unwrap()
+            .write_all(b"AppID 200 adding PID 2 as a tracked process game.exe\n").unwrap();
+        assert!(game_process_ever_observed_in_client(200, 100, &temp.0).unwrap());
     }
 
     #[test]

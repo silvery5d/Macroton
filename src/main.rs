@@ -90,6 +90,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "evidence" => evidence_command(&args[1..]),
         "plan" => plan_command(&args[1..]),
         "launch" => launch_command(&args[1..]),
+        "play" => play_command(&args[1..]),
+        "shortcut" => shortcut_command(&args[1..]),
         "stop" => stop_command(&args[1..]),
         "resource" => resource_command(&args[1..]),
         "runtime" => runtime_command(&args[1..]),
@@ -6173,6 +6175,9 @@ fn stop_command(args: &[String]) -> Result<(), String> {
         }
         index += 1;
     }
+    if let Some((owner, _)) = read_shared_client_marker(app_id, &data_root)? {
+        return Err(format!("AppID {app_id} is running in AppID {owner}'s shared Steam prefix; exit the game normally and use `macroton steam shared-client-finish {owner} {app_id}` for Cloud sync, or stop AppID {owner} explicitly to interrupt the whole client"));
+    }
     // Cancel an in-flight Steam warmup/retry before stopping its current
     // processes; otherwise the same launch command can recreate the client.
     execute::record_stop_request(app_id, &data_root).map_err(|error| error.to_string())?;
@@ -6202,7 +6207,7 @@ fn stop_command(args: &[String]) -> Result<(), String> {
 fn steam_command(args: &[String]) -> Result<(), String> {
     let Some(command) = args.first().map(String::as_str) else {
         return Err(
-            "usage: macroton steam <appinfo|bootstrap|client-status|client-wait|cloud-roundtrip|cloud-status|cloud-wait|connection-status|install|install-status|install-wait|inventory|launch-status|library-status|lifecycle-status|login|login-wait|prefix-status|prerequisite-status|rebind-runtime|session-status|target-status|trim-client> ..."
+            "usage: macroton steam <appinfo|bootstrap|client-status|client-wait|cloud-roundtrip|cloud-status|cloud-wait|connection-status|install|install-status|install-wait|inventory|launch-status|library-status|lifecycle-status|login|login-wait|prefix-status|prerequisite-status|rebind-runtime|session-status|shared-client-abandon|shared-client-finish|shared-client-install|shared-client-launch|shared-client-status|target-status|trim-client> ..."
                 .to_owned(),
         );
     };
@@ -6228,6 +6233,11 @@ fn steam_command(args: &[String]) -> Result<(), String> {
         "prerequisite-status" => steam_prerequisite_status_command(&args[1..]),
         "rebind-runtime" => steam_rebind_runtime_command(&args[1..]),
         "session-status" => steam_session_status_command(&args[1..]),
+        "shared-client-status" => steam_shared_client_status_command(&args[1..]),
+        "shared-client-install" => steam_shared_client_install_command(&args[1..]),
+        "shared-client-launch" => steam_shared_client_launch_command(&args[1..]),
+        "shared-client-finish" => steam_shared_client_finish_command(&args[1..]),
+        "shared-client-abandon" => steam_shared_client_abandon_command(&args[1..]),
         "target-status" => steam_target_status_command(&args[1..]),
         "trim-client" => steam_trim_client_command(&args[1..]),
         other => Err(format!("unknown steam command {other:?}")),
@@ -7235,6 +7245,7 @@ fn steam_cloud_wait_command(args: &[String]) -> Result<(), String> {
     let started = Instant::now();
     let mut last_state = None;
     let mut last_pending_operations = None;
+    let mut last_remote_freshness = None;
     loop {
         let mut status = if let Some(steam_root) = steam_root.as_deref() {
             cloud_status::inspect_steam_root(app_id, steam_root)
@@ -7252,6 +7263,10 @@ fn steam_cloud_wait_command(args: &[String]) -> Result<(), String> {
             );
             last_state = Some(status.state);
         }
+        if last_remote_freshness != Some(status.remote_freshness) {
+            println!("Steam Cloud AppID {app_id}: remote freshness {} (local cache match cannot establish latest other-device data)", status.remote_freshness.as_str());
+            last_remote_freshness = Some(status.remote_freshness);
+        }
         if last_pending_operations != Some(status.pending_remote_operations.len()) {
             if !status.pending_remote_operations.is_empty() {
                 println!(
@@ -7261,7 +7276,7 @@ fn steam_cloud_wait_command(args: &[String]) -> Result<(), String> {
             }
             last_pending_operations = Some(status.pending_remote_operations.len());
         }
-        if cloud_launch_ready(status.state, status.pending_remote_operations.len()) {
+        if cloud_launch_ready(status.state, status.pending_remote_operations.len(), status.remote_freshness) {
             let remote_copy_matches = status
                 .comparisons
                 .iter()
@@ -7269,7 +7284,7 @@ fn steam_cloud_wait_command(args: &[String]) -> Result<(), String> {
                 .count();
             let cache_direct_matches = status.comparisons.len() - remote_copy_matches;
             println!(
-                "Cloud gate: passed; {} declared file(s) match ({} remote-copy content, {} synced-cache direct)",
+                "Local Cloud cache gate: passed; {} declared file(s) match ({} remote-copy content, {} synced-cache direct). Latest data on other devices remains unverified",
                 status.comparisons.len(),
                 remote_copy_matches,
                 cache_direct_matches
@@ -7278,8 +7293,9 @@ fn steam_cloud_wait_command(args: &[String]) -> Result<(), String> {
         }
         if started.elapsed() >= Duration::from_secs(timeout_seconds) {
             return Err(format!(
-                "Steam Cloud did not reach content-verified synced and launch-ready within {timeout_seconds}s; final state {}, pending client operations {}",
+                "Steam Cloud did not reach content-verified synced and launch-ready within {timeout_seconds}s; final cache state {}, remote freshness {}, pending client operations {}",
                 status.state.as_str(),
+                status.remote_freshness.as_str(),
                 status.pending_remote_operations.len()
             ));
         }
@@ -7287,8 +7303,9 @@ fn steam_cloud_wait_command(args: &[String]) -> Result<(), String> {
     }
 }
 
-fn cloud_launch_ready(state: cloud_status::SyncState, pending_operations: usize) -> bool {
+fn cloud_launch_ready(state: cloud_status::SyncState, pending_operations: usize, remote_freshness: cloud_status::RemoteFreshness) -> bool {
     state == cloud_status::SyncState::Synced && pending_operations == 0
+        && remote_freshness == cloud_status::RemoteFreshness::Unverified
 }
 
 fn steam_trim_client_command(args: &[String]) -> Result<(), String> {
@@ -7769,6 +7786,10 @@ fn steam_install_status_command(args: &[String]) -> Result<(), String> {
         index += 1;
     }
     let status = if let Some(steam_root) = steam_root {
+        steam_install_status::inspect_steam_root(app_id, &steam_root)
+    } else if let Some((owner, _)) = read_shared_client_marker(app_id, &data_root)? {
+        let steam_root = data_root.join("games").join(owner.to_string())
+            .join("prefix/drive_c/Program Files (x86)/Steam");
         steam_install_status::inspect_steam_root(app_id, &steam_root)
     } else {
         steam_install_status::inspect(app_id, &data_root)
@@ -9390,6 +9411,8 @@ fn steam_launch_status_command(args: &[String]) -> Result<(), String> {
     }
     let status = if let Some(steam_root) = steam_root {
         launch_status::inspect_steam_root(app_id, &steam_root)
+    } else if let Some((owner, _)) = read_shared_client_marker(app_id, &data_root)? {
+        launch_status::inspect_in_client(app_id, owner, &data_root)
     } else {
         launch_status::inspect(app_id, &data_root)
     }
@@ -9559,6 +9582,8 @@ fn steam_cloud_status_command(args: &[String]) -> Result<(), String> {
     }
     let mut status = if let Some(steam_root) = steam_root {
         cloud_status::inspect_steam_root(app_id, &steam_root)
+    } else if let Some((owner, _)) = read_shared_client_marker(app_id, &data_root)? {
+        cloud_status::inspect_in_client(app_id, owner, &data_root)
     } else {
         cloud_status::inspect(app_id, &data_root)
     }
@@ -9572,6 +9597,11 @@ fn steam_cloud_status_command(args: &[String]) -> Result<(), String> {
                 profile.app_id
             ));
         }
+        if let Some((_, fingerprint)) = read_shared_client_marker(app_id, &data_root)?
+            && fingerprint != profile.fingerprint()
+        {
+            return Err("Cloud comparison profile differs from the active shared-client launch".to_owned());
+        }
         cloud_status::compare_profile_files(&mut status, &profile)
             .map_err(|error| error.to_string())?;
     }
@@ -9580,7 +9610,8 @@ fn steam_cloud_status_command(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     println!("Steam Cloud status for AppID {}", status.app_id);
-    println!("State:    {}", status.state.as_str());
+    println!("Cache:    {}", status.state.as_str());
+    println!("Remote:   {} (local cache does not prove latest data on other devices)", status.remote_freshness.as_str());
     println!("Prefix:   {}", status.prefix.display());
     if status.accounts.is_empty() {
         println!("Cache:    no per-account remotecache.vdf found");
@@ -9694,11 +9725,12 @@ fn cloud_status_json(status: &cloud_status::CloudStatus) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "{{\"schema_version\":1,\"appid\":{},\"state\":\"{}\",\"latest_event\":{},\"launch_ready\":{},\"pending_remote_operations\":[{}],\"comparisons\":[{}]}}\n",
+        "{{\"schema_version\":2,\"appid\":{},\"state\":\"{}\",\"remote_freshness\":\"{}\",\"latest_event\":{},\"launch_ready\":{},\"pending_remote_operations\":[{}],\"comparisons\":[{}]}}\n",
         status.app_id,
         status.state.as_str(),
+        status.remote_freshness.as_str(),
         json_optional_string(status.latest_event.as_deref()),
-        cloud_launch_ready(status.state, status.pending_remote_operations.len()),
+        cloud_launch_ready(status.state, status.pending_remote_operations.len(), status.remote_freshness),
         pending,
         comparisons
     )
@@ -10596,6 +10628,876 @@ fn other_live_steam_prefix_warning(app_id: u32, data_root: &Path) -> Result<Opti
     )))
 }
 
+fn play_profile(app_id: u32, explicit: Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let name = format!("{app_id}.conf");
+    let mut candidates = Vec::new();
+    if let Some(directory) = env::var_os("MACROTON_PROFILES_DIR") {
+        candidates.push(PathBuf::from(directory).join(&name));
+    }
+    if let Ok(executable) = env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            candidates.push(directory.join("compatibility").join(&name));
+            if let Some(parent) = directory.parent() {
+                candidates.push(parent.join("compatibility").join(&name));
+                if let Some(grandparent) = parent.parent() {
+                    candidates.push(grandparent.join("compatibility").join(&name));
+                }
+            }
+        }
+    }
+    candidates.push(PathBuf::from("compatibility").join(&name));
+    candidates.into_iter().find(|path| path.is_file()).ok_or_else(|| {
+        format!("no compatibility profile for AppID {app_id}; pass --profile PATH or set MACROTON_PROFILES_DIR")
+    })
+}
+
+const CLOUD_HANDOFF_PENDING: &str = ".macroton-cloud-handoff-pending";
+const SHARED_CLIENT_MARKER: &str = ".macroton-shared-client";
+const SHARED_CLIENT_PROFILE_PATH: &str = ".macroton-shared-client-profile-path";
+const SHARED_CLIENT_LOCK: &str = ".macroton-shared-client-operation";
+
+struct SharedClientLock(PathBuf);
+
+impl SharedClientLock {
+    fn acquire(_client_app_id: u32, data_root: &Path) -> Result<Self, String> {
+        let root = data_root.join("games");
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let path = root.join(SHARED_CLIENT_LOCK);
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&path)
+            .map_err(|error| format!("shared-client operation is already active or its lock needs review at {}: {error}", path.display()))?;
+        if let Err(error) = file.write_all(format!("pid={}\n", std::process::id()).as_bytes()) {
+            let _ = fs::remove_file(&path);
+            return Err(format!("cannot write shared-client lock {}: {error}", path.display()));
+        }
+        Ok(Self(path))
+    }
+}
+
+impl Drop for SharedClientLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn shared_client_marker(app_id: u32, data_root: &Path) -> PathBuf {
+    data_root.join("games").join(app_id.to_string()).join(SHARED_CLIENT_MARKER)
+}
+
+fn shared_client_profile_path_marker(app_id: u32, data_root: &Path) -> PathBuf {
+    data_root.join("games").join(app_id.to_string()).join(SHARED_CLIENT_PROFILE_PATH)
+}
+
+fn read_shared_client_marker(app_id: u32, data_root: &Path) -> Result<Option<(u32, String)>, String> {
+    let path = shared_client_marker(app_id, data_root);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read shared-client marker {}: {error}", path.display())),
+    };
+    let mut lines = contents.lines();
+    let valid = lines.next() == Some("schema=1")
+        && lines.next() == Some(format!("appid={app_id}").as_str());
+    let owner = lines.next().and_then(|line| line.strip_prefix("client_appid="))
+        .and_then(|value| value.parse::<u32>().ok());
+    let fingerprint = lines.next().and_then(|line| line.strip_prefix("profile_sha256="))
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if !valid || owner.is_none_or(|owner| owner == app_id) || fingerprint.is_none() || lines.next().is_some() {
+        return Err(format!("invalid shared-client marker {}", path.display()));
+    }
+    Ok(Some((owner.unwrap(), fingerprint.unwrap().to_owned())))
+}
+
+fn record_shared_client_marker(app_id: u32, client_app_id: u32, data_root: &Path, profile: &CompatibilityProfile, profile_path: &Path) -> Result<(), String> {
+    if app_id == client_app_id || profile.app_id != app_id {
+        return Err("shared-client marker target/profile mismatch".to_owned());
+    }
+    let marker = shared_client_marker(app_id, data_root);
+    fs::create_dir_all(marker.parent().ok_or("shared-client marker has no parent")?)
+        .map_err(|error| error.to_string())?;
+    if marker.exists() {
+        return Err(format!("shared-client marker already exists: {}", marker.display()));
+    }
+    let canonical_profile = profile_path.canonicalize().map_err(|error| error.to_string())?;
+    let profile_text = canonical_profile.to_str()
+        .filter(|value| !value.contains(['\n', '\r']))
+        .ok_or("shared-client profile path must be valid single-line UTF-8")?;
+    fs::write(shared_client_profile_path_marker(app_id, data_root), profile_text)
+        .map_err(|error| format!("cannot save shared-client profile path: {error}"))?;
+    let temporary = marker.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&temporary, format!("schema=1\nappid={app_id}\nclient_appid={client_app_id}\nprofile_sha256={}\n", profile.fingerprint()))
+        .map_err(|error| format!("cannot write shared-client marker {}: {error}", temporary.display()))?;
+    let result = fs::hard_link(&temporary, &marker)
+        .map_err(|error| format!("cannot commit shared-client marker {}: {error}", marker.display()));
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
+fn shared_client_markers(data_root: &Path) -> Result<Vec<(u32, u32, String)>, String> {
+    let games_root = data_root.join("games");
+    let entries = match fs::read_dir(&games_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("cannot scan shared-client markers: {error}")),
+    };
+    let mut markers = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Some(app_id) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else { continue };
+        if let Some((owner, fingerprint)) = read_shared_client_marker(app_id, data_root)? {
+            markers.push((app_id, owner, fingerprint));
+        }
+    }
+    markers.sort_by_key(|(app_id, _, _)| *app_id);
+    Ok(markers)
+}
+
+struct SharedClientAssessment {
+    resident_id: u32,
+    target_id: u32,
+    resident: CompatibilityProfile,
+    target: CompatibilityProfile,
+    target_path: PathBuf,
+    resident_plan: plan::LaunchPlan,
+    data_root: PathBuf,
+    runtime_root: PathBuf,
+    steam_root: PathBuf,
+    blockers: Vec<String>,
+}
+
+fn inspect_shared_client_candidate(args: &[String], require_installed: bool) -> Result<SharedClientAssessment, String> {
+    let usage = "usage: macroton steam shared-client-<status|install|launch> RESIDENT_APPID TARGET_APPID [--resident-profile PATH] [--target-profile PATH] [--data-root PATH] [--runtime-root PATH]";
+    let resident_id: u32 = args.first().ok_or(usage)?.parse()
+        .map_err(|_| "RESIDENT_APPID must be an unsigned integer")?;
+    let target_id: u32 = args.get(1).ok_or(usage)?.parse()
+        .map_err(|_| "TARGET_APPID must be an unsigned integer")?;
+    let mut resident_path = None;
+    let mut target_path = None;
+    let mut data_root = default_data_root()?;
+    let mut runtime_root = default_runtime_root()?;
+    let mut index = 2;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let value = args.get(index + 1).ok_or_else(|| format!("{option} requires a value"))?;
+        match option {
+            "--resident-profile" => resident_path = Some(PathBuf::from(value)),
+            "--target-profile" => target_path = Some(PathBuf::from(value)),
+            "--data-root" => data_root = PathBuf::from(value),
+            "--runtime-root" => runtime_root = PathBuf::from(value),
+            other => return Err(format!("unknown shared-client-status option {other:?}")),
+        }
+        index += 2;
+    }
+    let resident_path = play_profile(resident_id, resident_path)?;
+    let target_path = play_profile(target_id, target_path)?;
+    let resident = CompatibilityProfile::load(&resident_path).map_err(|error| error.to_string())?;
+    let target = CompatibilityProfile::load(&target_path).map_err(|error| error.to_string())?;
+    if resident.app_id != resident_id || target.app_id != target_id {
+        return Err("a selected profile AppID does not match its requested AppID".to_owned());
+    }
+    let resident_plan = plan::build_steam_client(&resident, &runtime_root);
+    let target_plan = plan::build_steam_client(&target, &runtime_root);
+    let mut blockers = macroton::shared_client::profile_blockers(
+        &resident, &target, &resident_plan, &target_plan);
+    let prefix = data_root.join("games").join(resident_id.to_string()).join("prefix");
+    let steam_root = prefix.join("drive_c/Program Files (x86)/Steam");
+    match resident_plan.runtime_fingerprint_sha256.as_deref() {
+        Some(fingerprint) => {
+            if let Err(error) = steam_prefix_status::validate_expected_runtime(
+                resident_id, &prefix, &resident_plan.runtime_id, fingerprint) {
+                blockers.push(format!("resident prefix provenance: {error}"));
+            }
+        }
+        None => blockers.push("resident runtime fingerprint is unavailable".to_owned()),
+    }
+    match steam_prefix_status::inspect(resident_id, &data_root) {
+        Ok(status) if status.readiness == steam_prefix_status::Readiness::StoredLoginPresent => (),
+        Ok(status) => blockers.push(format!("resident Steam login state is {}", status.readiness.as_str())),
+        Err(error) => blockers.push(format!("resident Steam prefix status: {error}")),
+    }
+    match steam_client_status::inspect(resident_id, &data_root) {
+        Ok(status) if status.state == steam_client_status::State::Current => (),
+        Ok(status) => blockers.push(format!("resident Steam updater state is {}", status.state.as_str())),
+        Err(error) => blockers.push(format!("resident Steam client status: {error}")),
+    }
+    let resident_live = match stop::inspect_resources(resident_id, &data_root) {
+        Ok(resources) => {
+            if resources.processes.iter().any(|process| process.category == "windows-game") {
+                blockers.push("resident prefix still has a running Windows game".to_owned());
+            }
+            resources.processes.iter().any(is_primary_steam_client_process)
+        }
+        Err(error) => {
+            blockers.push(format!("resident process inspection unavailable: {error}"));
+            false
+        }
+    };
+    if resident_live {
+        match steam_session::read(&prefix) {
+            Ok(session) => {
+                if session.app_id != resident_id
+                    || session.profile_sha256 != resident.fingerprint()
+                    || session.runtime_id != resident_plan.runtime_id
+                    || Some(session.runtime_fingerprint_sha256.as_str())
+                        != resident_plan.runtime_fingerprint_sha256.as_deref()
+                {
+                    blockers.push("resident session provenance does not match its selected profile/runtime".to_owned());
+                }
+            }
+            Err(error) => blockers.push(format!("resident session provenance: {error}")),
+        }
+    } else if !blockers.iter().any(|item| item.starts_with("resident process inspection unavailable")) {
+        blockers.push("resident Windows Steam client is not running".to_owned());
+    }
+    if require_installed {
+        match steam_install_status::inspect_steam_root(target_id, &steam_root) {
+            Ok(status) if status.state == steam_install_status::InstallState::Installed => (),
+            Ok(status) => blockers.push(format!(
+                "target is not installed in the resident Steam library (state {}); ownership remains unconfirmed",
+                status.state.as_str())),
+            Err(error) => blockers.push(format!("target install in resident Steam library: {error}")),
+        }
+    }
+    Ok(SharedClientAssessment { resident_id, target_id, resident, target, target_path, resident_plan, data_root, runtime_root, steam_root, blockers })
+}
+
+fn steam_shared_client_status_command(args: &[String]) -> Result<(), String> {
+    let candidate = inspect_shared_client_candidate(args, true)?;
+    println!("Shared Steam client candidate: AppID {} -> AppID {}", candidate.resident_id, candidate.target_id);
+    println!("Resident Steam root: {}", candidate.steam_root.display());
+    println!("Profile/prefix eligibility: {}", if candidate.blockers.is_empty() { "candidate" } else { "blocked" });
+    for blocker in &candidate.blockers {
+        println!("  blocker: {blocker}");
+    }
+    if let Some((owner, fingerprint)) = read_shared_client_marker(candidate.target_id, &candidate.data_root)? {
+        if owner != candidate.resident_id || fingerprint != candidate.target.fingerprint() {
+            println!("Shared launch: marker belongs to another client/profile; do not reuse this session");
+        } else {
+            let launch = launch_status::inspect_in_client(candidate.target_id, owner, &candidate.data_root)
+                .map_err(|error| error.to_string())?;
+            let cloud = cloud_status::inspect_in_client(candidate.target_id, owner, &candidate.data_root)
+                .map_err(|error| error.to_string())?;
+            println!("Shared launch: {}; Cloud local cache: {}; remote freshness: {}",
+                launch.state.as_str(), cloud.state.as_str(), cloud.remote_freshness.as_str());
+        }
+    } else {
+        println!("Shared launch: not submitted in this client");
+    }
+    Ok(())
+}
+
+fn finish_shared_client_game(app_id: u32, client_app_id: u32, data_root: &Path) -> Result<(), String> {
+    let (owner, fingerprint) = read_shared_client_marker(app_id, data_root)?
+        .ok_or_else(|| format!("AppID {app_id} has no shared-client launch marker"))?;
+    if owner != client_app_id {
+        return Err(format!("AppID {app_id} shared-client marker belongs to AppID {owner}, not {client_app_id}"));
+    }
+    let profile_path = handoff_profile(app_id, data_root, Some(&fingerprint))?;
+    let profile = CompatibilityProfile::load(&profile_path).map_err(|error| error.to_string())?;
+    let launch = launch_status::inspect_in_client(app_id, client_app_id, data_root)
+        .map_err(|error| error.to_string())?;
+    if launch.state != launch_status::LaunchState::Exited {
+        return Err(format!("AppID {app_id} shared game state is {}; wait for its exit", launch.state.as_str()));
+    }
+    match profile.steam_cloud.effective(!profile.cloud_files.is_empty()) {
+        SteamCloudPolicy::Required => wait_for_handoff_cloud_in_client(app_id, client_app_id, data_root,
+            &profile, launch.latest_event.as_deref().ok_or("shared game exit event is missing")?)?,
+        SteamCloudPolicy::Unsupported => (),
+        SteamCloudPolicy::Unspecified => return Err(format!("AppID {app_id} Cloud policy is unreviewed")),
+    }
+    let resources = stop::inspect_resources(client_app_id, data_root)
+        .map_err(|error| error.to_string())?;
+    if resources.processes.iter().any(|process| process.category == "windows-game") {
+        return Err("a game started in the shared prefix during Cloud handoff".to_owned());
+    }
+    fs::remove_file(shared_client_marker(app_id, data_root))
+        .map_err(|error| format!("cannot clear completed shared-client marker: {error}"))?;
+    let _ = fs::remove_file(shared_client_profile_path_marker(app_id, data_root));
+    println!("AppID {app_id} shared-client session finished; Cloud handoff is complete");
+    Ok(())
+}
+
+fn steam_shared_client_finish_command(args: &[String]) -> Result<(), String> {
+    let usage = "usage: macroton steam shared-client-finish RESIDENT_APPID TARGET_APPID [--data-root PATH]";
+    let owner: u32 = args.first().ok_or(usage)?.parse().map_err(|_| usage)?;
+    let target: u32 = args.get(1).ok_or(usage)?.parse().map_err(|_| usage)?;
+    let mut data_root = default_data_root()?;
+    if args.len() == 4 && args[2] == "--data-root" {
+        data_root = PathBuf::from(&args[3]);
+    } else if args.len() != 2 {
+        return Err(usage.to_owned());
+    }
+    let _lock = SharedClientLock::acquire(owner, &data_root)?;
+    finish_shared_client_game(target, owner, &data_root)
+}
+
+fn steam_shared_client_abandon_command(args: &[String]) -> Result<(), String> {
+    let usage = "usage: macroton steam shared-client-abandon RESIDENT_APPID TARGET_APPID [--data-root PATH] [--runtime-root PATH]";
+    let owner: u32 = args.first().ok_or(usage)?.parse().map_err(|_| usage)?;
+    let target: u32 = args.get(1).ok_or(usage)?.parse().map_err(|_| usage)?;
+    let mut data_root = default_data_root()?;
+    let mut runtime_root = default_runtime_root()?;
+    let mut index = 2;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let value = args.get(index + 1).ok_or_else(|| format!("{option} requires a value"))?;
+        match option {
+            "--data-root" => data_root = PathBuf::from(value),
+            "--runtime-root" => runtime_root = PathBuf::from(value),
+            other => return Err(format!("unknown shared-client-abandon option {other:?}")),
+        }
+        index += 2;
+    }
+    let _lock = SharedClientLock::acquire(owner, &data_root)?;
+    let marker_owner = read_shared_client_marker(target, &data_root)?
+        .ok_or_else(|| format!("AppID {target} has no shared-client launch marker"))?.0;
+    if marker_owner != owner {
+        return Err(format!("AppID {target} marker belongs to AppID {marker_owner}, not {owner}"));
+    }
+    let launch = launch_status::inspect_in_client(target, owner, &data_root)
+        .map_err(|error| error.to_string())?;
+    if !matches!(launch.state, launch_status::LaunchState::NoEvidence
+        | launch_status::LaunchState::Submitted | launch_status::LaunchState::Failed)
+    {
+        return Err(format!("AppID {target} launch state is {}; cannot abandon a game or user/Cloud prompt", launch.state.as_str()));
+    }
+    if launch_status::game_process_ever_observed_in_client(target, owner, &data_root)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("Steam observed a target game process after this shared request; finish its Cloud handoff instead".to_owned());
+    }
+    let cloud = cloud_status::inspect_in_client(target, owner, &data_root)
+        .map_err(|error| error.to_string())?;
+    if !cloud.pending_remote_operations.is_empty()
+        || cloud.remote_freshness != cloud_status::RemoteFreshness::Unverified
+        || cloud.state == cloud_status::SyncState::Syncing
+    {
+        return Err("target Steam Cloud has a pending or unresolved operation; cannot abandon it".to_owned());
+    }
+    let resources = stop::inspect_resources(owner, &data_root).map_err(|error| error.to_string())?;
+    if resources.processes.iter().any(|process| process.category == "windows-game") {
+        return Err("a Windows game is still running in the shared prefix".to_owned());
+    }
+    if !resources.pids.is_empty() {
+        stop::stop_processes_preserve_session(owner, &data_root, &runtime_root)
+            .map_err(|error| error.to_string())?;
+    }
+    fs::remove_file(shared_client_marker(target, &data_root))
+        .map_err(|error| format!("cannot clear abandoned shared-client marker: {error}"))?;
+    let _ = fs::remove_file(shared_client_profile_path_marker(target, &data_root));
+    println!("AppID {target} unstarted shared request abandoned after stopping AppID {owner}'s Steam client; login state preserved");
+    Ok(())
+}
+
+fn steam_shared_client_launch_command(args: &[String]) -> Result<(), String> {
+    let candidate = inspect_shared_client_candidate(args, true)?;
+    let _lock = SharedClientLock::acquire(candidate.resident_id, &candidate.data_root)?;
+    if !candidate.blockers.is_empty() {
+        return Err(format!("shared Steam launch is blocked: {}", candidate.blockers.join("; ")));
+    }
+    if !candidate.target.arguments.is_empty() || candidate.target.steam_launcher_bypass.is_some() {
+        return Err("shared Steam launch currently requires a target profile without game-specific Steam arguments or launcher bypass".to_owned());
+    }
+    for (app_id, owner, _) in shared_client_markers(&candidate.data_root)? {
+        if owner != candidate.resident_id {
+            return Err(format!("AppID {app_id} still uses another shared Steam client {owner}; finish it first"));
+        }
+        finish_shared_client_game(app_id, owner, &candidate.data_root)?;
+    }
+    if let Some(fingerprint) = pending_cloud_handoff_fingerprint(candidate.resident_id, &candidate.data_root)? {
+        if fingerprint != candidate.resident.fingerprint() {
+            return Err("resident Cloud handoff belongs to a different profile".to_owned());
+        }
+        let launch = launch_status::inspect(candidate.resident_id, &candidate.data_root)
+            .map_err(|error| error.to_string())?;
+        if launch.state != launch_status::LaunchState::Exited {
+            return Err(format!("resident game state is {}; wait for its exit", launch.state.as_str()));
+        }
+        if candidate.resident.steam_cloud.effective(!candidate.resident.cloud_files.is_empty()) == SteamCloudPolicy::Required {
+            wait_for_handoff_cloud(candidate.resident_id, &candidate.data_root, &candidate.resident,
+                launch.latest_event.as_deref().ok_or("resident game exit event is missing")?)?;
+        }
+    }
+    let installed = steam::scan(&candidate.steam_root).map_err(|error| error.to_string())?;
+    let game = installed.iter().find(|game| game.app_id == candidate.target_id)
+        .ok_or_else(|| format!("target AppID {} is absent from the resident Steam library", candidate.target_id))?;
+    let target_plan = plan::build(game, &candidate.target, &candidate.runtime_root);
+    if !target_plan.is_ready() {
+        return Err(format!("target launch plan is blocked: {}", target_plan.blockers.join("; ")));
+    }
+    let prefix = candidate.data_root.join("games").join(candidate.resident_id.to_string()).join("prefix");
+    require_persistent_data_root(&candidate.data_root, false, "shared Windows Steam launch")?;
+    require_unlocked_console_session()?;
+    let resources = stop::inspect_resources(candidate.resident_id, &candidate.data_root)
+        .map_err(|error| error.to_string())?;
+    if resources.processes.iter().any(|process| process.category == "windows-game")
+        || !resources.processes.iter().any(is_primary_steam_client_process) {
+        return Err("resident Steam client changed or a game started during Cloud handoff".to_owned());
+    }
+    execute::prepare_steam_launch(&target_plan, &prefix).map_err(|error| error.to_string())?;
+    launch_status::record_launch_boundary_in_client(candidate.target_id, candidate.resident_id, &candidate.data_root)
+        .map_err(|error| error.to_string())?;
+    record_shared_client_marker(candidate.target_id, candidate.resident_id, &candidate.data_root, &candidate.target, &candidate.target_path)?;
+    let request = execute::request_steam_game_in_client(&candidate.resident_plan, candidate.target_id, &candidate.data_root)
+        .map_err(|error| format!("shared launch request failed; the pending marker remains for safe recovery: {error}"))?;
+    let fingerprint = candidate.resident_plan.runtime_fingerprint_sha256.as_deref()
+        .ok_or("resident runtime fingerprint disappeared before resource guard")?;
+    let guard = spawn_resource_guard(
+        candidate.resident_id, &candidate.data_root, &candidate.runtime_root,
+        &candidate.resident_plan.runtime_id, 4096, None, None,
+        Some(&resource_guard_identity(&candidate.resident_plan, fingerprint)),
+        candidate.target.executable.to_str(),
+    ).map_err(|error| format!("shared request was submitted and its pending marker remains, but resource guard failed: {error}"))?;
+    println!("AppID {} launch request submitted to AppID {}'s resident Steam client (PID {})",
+        candidate.target_id, candidate.resident_id, request.pid);
+    println!("Resource guard: PID {}, log {}", guard.0, guard.1.display());
+    println!("Submission is not proof of a game window or remote Cloud freshness; inspect `macroton steam shared-client-status {} {}`",
+        candidate.resident_id, candidate.target_id);
+    Ok(())
+}
+
+fn steam_shared_client_install_command(args: &[String]) -> Result<(), String> {
+    let candidate = inspect_shared_client_candidate(args, false)?;
+    let _lock = SharedClientLock::acquire(candidate.resident_id, &candidate.data_root)?;
+    if !candidate.blockers.is_empty() {
+        return Err(format!("shared Steam install is blocked: {}", candidate.blockers.join("; ")));
+    }
+    for (app_id, owner, _) in shared_client_markers(&candidate.data_root)? {
+        if owner != candidate.resident_id {
+            return Err(format!("AppID {app_id} still uses another shared Steam client {owner}; finish it first"));
+        }
+        finish_shared_client_game(app_id, owner, &candidate.data_root)?;
+    }
+    let install = steam_install_status::inspect_steam_root(candidate.target_id, &candidate.steam_root)
+        .map_err(|error| error.to_string())?;
+    match install.state {
+        steam_install_status::InstallState::Installed => {
+            println!("AppID {} is already installed in AppID {}'s Steam library", candidate.target_id, candidate.resident_id);
+            return Ok(());
+        }
+        steam_install_status::InstallState::NotRequested => (),
+        state => {
+            println!("AppID {} installation state in the shared Steam library: {}; ownership remains unconfirmed until Steam decides", candidate.target_id, state.as_str());
+            return Ok(());
+        }
+    }
+    let pending = pending_cloud_handoff_fingerprint(candidate.resident_id, &candidate.data_root)?;
+    if let Some(fingerprint) = pending {
+        if fingerprint != candidate.resident.fingerprint() {
+            return Err("resident Cloud handoff belongs to a different profile; cannot install another game yet".to_owned());
+        }
+        let launch = launch_status::inspect(candidate.resident_id, &candidate.data_root)
+            .map_err(|error| error.to_string())?;
+        if launch.state != launch_status::LaunchState::Exited {
+            return Err(format!("resident game state is {}; wait for its exit before shared install", launch.state.as_str()));
+        }
+        if candidate.resident.steam_cloud.effective(!candidate.resident.cloud_files.is_empty())
+            == SteamCloudPolicy::Required
+        {
+            wait_for_handoff_cloud(candidate.resident_id, &candidate.data_root, &candidate.resident,
+                launch.latest_event.as_deref().ok_or("resident exit event is missing")?)?;
+        }
+    }
+    require_persistent_data_root(&candidate.data_root, false, "shared Windows Steam install")?;
+    require_unlocked_console_session()?;
+    let resources = stop::inspect_resources(candidate.resident_id, &candidate.data_root)
+        .map_err(|error| error.to_string())?;
+    if resources.processes.iter().any(|process| process.category == "windows-game")
+        || !resources.processes.iter().any(is_primary_steam_client_process)
+    {
+        return Err("resident Steam client changed or a game started during Cloud handoff; retry after it is idle".to_owned());
+    }
+    let request = execute::request_steam_install_in_client(
+        &candidate.resident_plan, candidate.target_id, &candidate.data_root)
+        .map_err(|error| error.to_string())?;
+    println!("Requested AppID {} installation in AppID {}'s live Steam client", candidate.target_id, candidate.resident_id);
+    println!("Steam may request sign-in, purchase, EULA, or installation confirmation; ownership is unconfirmed");
+    println!("Request PID: {}; Steam root: {}", request.pid, candidate.steam_root.display());
+    println!("Progress: macroton steam install-status {} --steam-root {}",
+        candidate.target_id, shell_quote(&candidate.steam_root.to_string_lossy()));
+    Ok(())
+}
+
+fn cloud_handoff_marker(app_id: u32, data_root: &Path) -> PathBuf {
+    data_root.join("games").join(app_id.to_string()).join(CLOUD_HANDOFF_PENDING)
+}
+
+fn record_cloud_handoff(app_id: u32, data_root: &Path, profile: &CompatibilityProfile) -> Result<(), String> {
+    let marker = cloud_handoff_marker(app_id, data_root);
+    let temporary = marker.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&temporary, format!("schema=1\nappid={app_id}\nprofile_sha256={}\n", profile.fingerprint()))
+        .map_err(|error| format!("cannot write Cloud handoff marker {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, &marker)
+        .map_err(|error| format!("cannot commit Cloud handoff marker {}: {error}", marker.display()))
+}
+
+fn pending_cloud_handoff_fingerprint(app_id: u32, data_root: &Path) -> Result<Option<String>, String> {
+    let marker = cloud_handoff_marker(app_id, data_root);
+    let contents = match fs::read_to_string(&marker) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read Cloud handoff marker {}: {error}", marker.display())),
+    };
+    let expected_prefix = format!("schema=1\nappid={app_id}\nprofile_sha256=");
+    let fingerprint = contents.strip_prefix(&expected_prefix)
+        .and_then(|value| value.strip_suffix('\n'))
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| format!("invalid Cloud handoff marker {}", marker.display()))?;
+    Ok(Some(fingerprint.to_owned()))
+}
+
+fn handoff_profile(app_id: u32, data_root: &Path, pending_fingerprint: Option<&str>) -> Result<PathBuf, String> {
+    let prefix = data_root.join("games").join(app_id.to_string()).join("prefix");
+    let fingerprint = match pending_fingerprint {
+        Some(fingerprint) => fingerprint.to_owned(),
+        None => steam_session::read(&prefix).map_err(|error| error.to_string())?.profile_sha256,
+    };
+    if let Ok(path_text) = fs::read_to_string(shared_client_profile_path_marker(app_id, data_root)) {
+        let path = PathBuf::from(path_text);
+        if let Ok(profile) = CompatibilityProfile::load(&path)
+            && profile.app_id == app_id && profile.fingerprint() == fingerprint
+        {
+            return Ok(path);
+        }
+    }
+    let mut roots = Vec::new();
+    if let Some(root) = env::var_os("MACROTON_PROFILES_DIR") {
+        roots.push(PathBuf::from(root));
+    }
+    if let Ok(executable) = env::current_exe() {
+        for ancestor in executable.ancestors().take(4) {
+            roots.push(ancestor.join("compatibility"));
+        }
+    }
+    roots.push(PathBuf::from("compatibility"));
+    for root in roots {
+        for directory in [root.clone(), root.join("experiments")] {
+            let Ok(entries) = fs::read_dir(&directory) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|extension| extension != "conf") {
+                    continue;
+                }
+                let Ok(profile) = CompatibilityProfile::load(&path) else { continue };
+                if profile.app_id == app_id && profile.fingerprint() == fingerprint {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+    Err(format!(
+        "cannot find the active profile for AppID {app_id} (fingerprint {}); keep its Steam client running until Cloud sync is verified, or place the exact profile in compatibility/ or compatibility/experiments/",
+        fingerprint
+    ))
+}
+
+fn steam_event_timestamp(event: &str) -> Option<&str> {
+    let timestamp = event.strip_prefix('[')?.get(..19)?;
+    (timestamp.as_bytes().get(4) == Some(&b'-')
+        && timestamp.as_bytes().get(7) == Some(&b'-')
+        && timestamp.as_bytes().get(10) == Some(&b' ')
+        && timestamp.as_bytes().get(13) == Some(&b':')
+        && timestamp.as_bytes().get(16) == Some(&b':'))
+        .then_some(timestamp)
+}
+
+fn cloud_handoff_ready(status: &cloud_status::CloudStatus, exit_event: &str) -> bool {
+    let Some(exit_time) = steam_event_timestamp(exit_event) else { return false };
+    cloud_launch_ready(status.state, status.pending_remote_operations.len(), status.remote_freshness)
+        && status.latest_event.as_deref().and_then(steam_event_timestamp)
+            .is_some_and(|time| time >= exit_time)
+}
+
+fn wait_for_handoff_cloud(app_id: u32, data_root: &Path, profile: &CompatibilityProfile, exit_event: &str) -> Result<(), String> {
+    wait_for_handoff_cloud_in_client(app_id, app_id, data_root, profile, exit_event)
+}
+
+fn wait_for_handoff_cloud_in_client(app_id: u32, client_app_id: u32, data_root: &Path, profile: &CompatibilityProfile, exit_event: &str) -> Result<(), String> {
+    let exit_time = steam_event_timestamp(exit_event)
+        .ok_or_else(|| format!("AppID {app_id} game exit has no timestamp; cannot verify post-exit Cloud sync"))?;
+    let _idle_sleep_guard = IdleSleepGuard::acquire("cross-game Steam Cloud handoff")?;
+    let started = Instant::now();
+    loop {
+        let mut status = cloud_status::inspect_in_client(app_id, client_app_id, data_root).map_err(|error| error.to_string())?;
+        cloud_status::compare_profile_files(&mut status, profile).map_err(|error| error.to_string())?;
+        let cloud_after_exit = status.latest_event.as_deref()
+            .and_then(steam_event_timestamp)
+            .is_some_and(|time| time >= exit_time);
+        if cloud_handoff_ready(&status, exit_event) {
+            println!("AppID {app_id} Steam Cloud reconciled after game exit; {} declared local file(s) match its cache", status.comparisons.len());
+            return Ok(());
+        }
+        if started.elapsed() >= Duration::from_secs(300) {
+            return Err(format!(
+                "AppID {app_id} Steam Cloud was not verified after game exit within 300s (cache {}, remote {}, post-exit event {}); keeping its Steam client running and refusing the switch",
+                status.state.as_str(), status.remote_freshness.as_str(), cloud_after_exit
+            ));
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn handoff_other_steam_clients(app_id: u32, data_root: &Path, runtime_root: &Path) -> Result<(), String> {
+    let games_root = data_root.join("games");
+    if games_root.join(SHARED_CLIENT_LOCK).exists() {
+        return Err("a shared Steam-client operation is in progress or its lock needs review; refusing a separate-client switch".to_owned());
+    }
+    if let Some((target, owner, _)) = shared_client_markers(data_root)?.first() {
+        return Err(format!("AppID {target} still has a shared Steam session in AppID {owner}'s client; finish it after Cloud sync, or abandon it if no game process was ever observed"));
+    }
+    let entries = match fs::read_dir(&games_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect Steam prefixes in {}: {error}", games_root.display())),
+    };
+    let mut others = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot inspect Steam prefix entry: {error}"))?;
+        let Some(other_id) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else { continue };
+        if other_id == app_id || !entry.path().is_dir() { continue; }
+        let resources = stop::inspect_resources(other_id, data_root).map_err(|error| error.to_string())?;
+        let live_client = resources.processes.iter().any(is_primary_steam_client_process);
+        let pending = pending_cloud_handoff_fingerprint(other_id, data_root)?;
+        if live_client || pending.is_some() {
+            others.push((other_id, live_client, pending));
+        }
+    }
+    others.sort_by_key(|(other_id, _, _)| *other_id);
+    for (other_id, live_client, pending) in others {
+        let launch = launch_status::inspect(other_id, data_root).map_err(|error| error.to_string())?;
+        if launch.state != launch_status::LaunchState::Exited {
+            return Err(format!(
+                "AppID {other_id} Steam is still active (game state {}); finish that game and wait for its exit before opening AppID {app_id}",
+                launch.state.as_str()
+            ));
+        }
+        let profile_path = handoff_profile(other_id, data_root, pending.as_deref())?;
+        let profile = CompatibilityProfile::load(&profile_path).map_err(|error| error.to_string())?;
+        match profile.steam_cloud.effective(!profile.cloud_files.is_empty()) {
+            SteamCloudPolicy::Unsupported => println!("AppID {other_id}: reviewed Steam Cloud unsupported; no upload gate required"),
+            SteamCloudPolicy::Required => {
+                println!("Waiting for AppID {other_id} Steam Cloud before opening AppID {app_id}");
+                wait_for_handoff_cloud(other_id, data_root, &profile,
+                    launch.latest_event.as_deref().ok_or_else(|| format!("AppID {other_id} exit event is missing"))?)?;
+            }
+            SteamCloudPolicy::Unspecified => return Err(format!(
+                "AppID {other_id} has no reviewed Steam Cloud policy or declared save paths; refusing to switch clients before its upload is known"
+            )),
+        }
+        let launch = launch_status::inspect(other_id, data_root).map_err(|error| error.to_string())?;
+        let resources = stop::inspect_resources(other_id, data_root).map_err(|error| error.to_string())?;
+        if launch.state != launch_status::LaunchState::Exited
+            || resources.processes.iter().any(|process| process.category == "windows-game")
+        {
+            return Err(format!("AppID {other_id} started a game during Cloud handoff; refusing to stop its Steam client"));
+        }
+        if live_client {
+            stop_command(&[
+                other_id.to_string(), "--preserve-session".into(),
+                "--data-root".into(), data_root.to_string_lossy().into_owned(),
+                "--runtime-root".into(), runtime_root.to_string_lossy().into_owned(),
+            ])?;
+        }
+        let marker = cloud_handoff_marker(other_id, data_root);
+        match fs::remove_file(&marker) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            Err(error) => return Err(format!("cannot clear Cloud handoff marker {}: {error}", marker.display())),
+        }
+        println!("AppID {other_id} Cloud handoff completed; AppID {app_id} may now start");
+    }
+    Ok(())
+}
+
+fn play_command(args: &[String]) -> Result<(), String> {
+    let app_id: u32 = args.first().ok_or("usage: macroton play APPID [--profile PATH] [--data-root PATH] [--runtime-root PATH]")?
+        .parse().map_err(|_| "APPID must be an unsigned integer")?;
+    let mut profile_path = None;
+    let mut data_root = default_data_root()?;
+    let mut runtime_root = default_runtime_root()?;
+    let mut index = 1;
+    while index < args.len() {
+        let option = args[index].as_str();
+        index += 1;
+        let value = args.get(index).ok_or_else(|| format!("{option} requires a value"))?;
+        match option {
+            "--profile" => profile_path = Some(PathBuf::from(value)),
+            "--data-root" => data_root = PathBuf::from(value),
+            "--runtime-root" => runtime_root = PathBuf::from(value),
+            other => return Err(format!("unknown play option {other:?}")),
+        }
+        index += 1;
+    }
+    let profile_path = play_profile(app_id, profile_path)?;
+    let profile = CompatibilityProfile::load(&profile_path).map_err(|error| error.to_string())?;
+    if profile.app_id != app_id {
+        return Err(format!("profile AppID {} does not match requested AppID {app_id}", profile.app_id));
+    }
+    if try_play_shared_client(app_id, &profile_path, &data_root, &runtime_root)? {
+        return Ok(());
+    }
+    let prefix = steam_prefix_status::inspect(app_id, &data_root).map_err(|error| error.to_string())?;
+    if prefix.readiness == steam_prefix_status::Readiness::NotBootstrapped {
+        return Err(format!("Steam client setup is required for AppID {app_id}; use `macroton steam bootstrap {app_id} --profile {}` with a verified Steam installer", profile_path.display()));
+    }
+    if prefix.readiness == steam_prefix_status::Readiness::SignInRequired {
+        handoff_other_steam_clients(app_id, &data_root, &runtime_root)?;
+        println!("Steam sign-in is required for AppID {app_id}. Opening the existing login flow.");
+        return steam_login_command(&[app_id.to_string(), "--profile".into(), profile_path.to_string_lossy().into_owned(), "--data-root".into(), data_root.to_string_lossy().into_owned(), "--runtime-root".into(), runtime_root.to_string_lossy().into_owned()]);
+    }
+    let install = steam_install_status::inspect(app_id, &data_root).map_err(|error| error.to_string())?;
+    match install.state {
+        steam_install_status::InstallState::Installed => {
+            launch_command(&[app_id.to_string(), "--profile".into(), profile_path.to_string_lossy().into_owned(), "--data-root".into(), data_root.to_string_lossy().into_owned(), "--runtime-root".into(), runtime_root.to_string_lossy().into_owned()])
+        }
+        steam_install_status::InstallState::NotRequested => {
+            handoff_other_steam_clients(app_id, &data_root, &runtime_root)?;
+            println!("Requesting Steam installation for AppID {app_id}. Steam may ask for sign-in, purchase, EULA, or installation confirmation; ownership is not yet determined.");
+            steam_install_command(&[app_id.to_string(), "--profile".into(), profile_path.to_string_lossy().into_owned(), "--data-root".into(), data_root.to_string_lossy().into_owned(), "--runtime-root".into(), runtime_root.to_string_lossy().into_owned()])
+        }
+        state => {
+            println!("AppID {app_id} installation state: {}. Continue in Steam, then run `macroton play {app_id}` again. Ownership is unconfirmed by this state.", state.as_str());
+            Ok(())
+        }
+    }
+}
+
+fn try_play_shared_client(app_id: u32, profile_path: &Path, data_root: &Path, runtime_root: &Path) -> Result<bool, String> {
+    let games_root = data_root.join("games");
+    let entries = match fs::read_dir(&games_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot inspect existing Steam clients: {error}")),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Some(owner) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else { continue };
+        if owner == app_id || !entry.path().is_dir() { continue; }
+        let resources = stop::inspect_resources(owner, data_root).map_err(|error| error.to_string())?;
+        if !resources.processes.iter().any(is_primary_steam_client_process) { continue; }
+        let Ok(owner_profile) = handoff_profile(owner, data_root, None) else { continue };
+        let request = vec![
+            owner.to_string(), app_id.to_string(),
+            "--resident-profile".into(), owner_profile.to_string_lossy().into_owned(),
+            "--target-profile".into(), profile_path.to_string_lossy().into_owned(),
+            "--data-root".into(), data_root.to_string_lossy().into_owned(),
+            "--runtime-root".into(), runtime_root.to_string_lossy().into_owned(),
+        ];
+        let candidate = inspect_shared_client_candidate(&request, false)?;
+        if candidate.blockers.is_empty() {
+            candidates.push((candidate, request));
+        }
+    }
+    if candidates.len() > 1 {
+        return Err(format!("AppID {app_id} matches multiple live Steam clients; select one explicitly with `macroton steam shared-client-launch RESIDENT_APPID {app_id}`"));
+    }
+    if let Some((candidate, request)) = candidates.pop() {
+        let install = steam_install_status::inspect_steam_root(app_id, &candidate.steam_root)
+            .map_err(|error| error.to_string())?;
+        if install.state == steam_install_status::InstallState::Installed {
+            steam_shared_client_launch_command(&request)?;
+        } else {
+            steam_shared_client_install_command(&request)?;
+        }
+        return Ok(true);
+    }
+    if let Some((target, owner, _)) = shared_client_markers(data_root)?.first() {
+        if *target == app_id {
+            let launch = launch_status::inspect_in_client(app_id, *owner, data_root)
+                .map_err(|error| error.to_string())?;
+            if matches!(launch.state,
+                launch_status::LaunchState::Submitted
+                    | launch_status::LaunchState::InstallingPrerequisites
+                    | launch_status::LaunchState::WaitingEula
+                    | launch_status::LaunchState::WaitingCloud
+                    | launch_status::LaunchState::WaitingUser
+                    | launch_status::LaunchState::RunningObserved)
+            {
+                println!("AppID {app_id} already has a shared Steam launch state: {}; use that session or resolve its Steam prompt", launch.state.as_str());
+                return Ok(true);
+            }
+        }
+        return Err(format!("AppID {target} still has a shared Steam session in AppID {owner}'s client; finish it after Cloud sync, or abandon it if no game process was ever observed"));
+    }
+    Ok(false)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn shortcut_game_name(app_id: u32, profile_path: &Path, fallback: Option<&str>) -> Result<String, String> {
+    let catalog = profile_path.parent().and_then(Path::parent)
+        .map(|root| root.join("shortcuts/catalog.tsv"));
+    if let Some(catalog) = catalog.filter(|path| path.is_file()) {
+        let contents = fs::read_to_string(&catalog).map_err(|error| format!("cannot read {}: {error}", catalog.display()))?;
+        for line in contents.lines() {
+            if line.is_empty() || line.starts_with('#') { continue; }
+            let (id, name) = line.split_once('\t').ok_or_else(|| format!("invalid shortcut catalog row in {}", catalog.display()))?;
+            if id.parse::<u32>().ok() == Some(app_id) {
+                if name.trim() != name || name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':', '\0']) {
+                    return Err(format!("unsafe shortcut name for AppID {app_id}"));
+                }
+                return Ok(name.to_owned());
+            }
+        }
+    }
+    fallback.map(str::to_owned).ok_or_else(|| format!("no shortcut name for AppID {app_id}"))
+}
+
+fn shortcut_command(args: &[String]) -> Result<(), String> {
+    let app_id: u32 = args.first().ok_or("usage: macroton shortcut APPID [--output PATH.command] [--profile PATH]")?
+        .parse().map_err(|_| "APPID must be an unsigned integer")?;
+    let mut output = None;
+    let mut profile = None;
+    let mut index = 1;
+    while index < args.len() {
+        let option = args[index].as_str();
+        index += 1;
+        let value = args.get(index).ok_or_else(|| format!("{option} requires a value"))?;
+        match option {
+            "--output" => output = Some(PathBuf::from(value)),
+            "--profile" => profile = Some(PathBuf::from(value)),
+            other => return Err(format!("unknown shortcut option {other:?}")),
+        }
+        index += 1;
+    }
+    let profile = play_profile(app_id, profile)?;
+    let loaded = CompatibilityProfile::load(&profile).map_err(|error| error.to_string())?;
+    if loaded.app_id != app_id {
+        return Err(format!("profile AppID {} does not match requested AppID {app_id}", loaded.app_id));
+    }
+    let game_name = shortcut_game_name(app_id, &profile, loaded.steam_install_dir.as_deref())?;
+    let output = match output {
+        Some(path) => path,
+        None => env::current_dir().map_err(|error| error.to_string())?
+            .join("shortcuts").join(format!("{game_name}.command")),
+    };
+    if !output.is_absolute() || output.extension().is_none_or(|ext| ext != "command") {
+        return Err("shortcut output must be an absolute .command path".into());
+    }
+    if output.exists() {
+        return Err(format!("shortcut already exists: {}", output.display()));
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("cannot create shortcut directory {}: {error}", parent.display()))?;
+    }
+    let executable = env::current_exe().map_err(|error| error.to_string())?;
+    let body = format!("#!/bin/sh\nexec {} play {} --profile {}\n", shell_quote(&executable.to_string_lossy()), app_id, shell_quote(&profile.canonicalize().map_err(|error| error.to_string())?.to_string_lossy()));
+    let mut file = OpenOptions::new().write(true).create_new(true).open(&output)
+        .map_err(|error| format!("cannot create shortcut {}: {error}", output.display()))?;
+    file.write_all(body.as_bytes()).map_err(|error| error.to_string())?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o755)).map_err(|error| error.to_string())?;
+    }
+    println!("Created AppID {app_id} shortcut: {}", output.display());
+    Ok(())
+}
+
 fn launch_command(args: &[String]) -> Result<(), String> {
     let app_id: u32 = args
         .first()
@@ -10677,8 +11579,15 @@ fn launch_command(args: &[String]) -> Result<(), String> {
         return Err(format!("launch is blocked: {}", plan.blockers.join("; ")));
     }
     if plan.launch_mode == macroton::profile::LaunchMode::Steam {
+        let fingerprint = plan.runtime_fingerprint_sha256.as_deref()
+            .ok_or("ready Steam launch plan is missing its runtime fingerprint")?;
+        steam_prefix_status::validate_expected_runtime(app_id,
+            &data_root.join("games").join(app_id.to_string()).join("prefix"),
+            &plan.runtime_id, fingerprint)
+            .map_err(|error| format!("selected profile is incompatible with the existing AppID {app_id} Steam prefix: {error}. Check the profile and registered runtime before launching"))?;
         require_persistent_data_root(&data_root, allow_ephemeral_data_root, "Steam game launch")?;
         require_unlocked_console_session()?;
+        handoff_other_steam_clients(app_id, &data_root, &runtime_root)?;
         if let Some(warning) = other_live_steam_prefix_warning(app_id, &data_root)? {
             eprintln!("Steam compatibility warning: {warning}");
         }
@@ -10710,6 +11619,15 @@ fn launch_command(args: &[String]) -> Result<(), String> {
         // with a Cloud choice, or may have resolved an old intent since the
         // append-only log entry. Never choose a save version or fall back to
         // a direct game executable here.
+        if !profile.cloud_files.is_empty()
+            && let Ok(cloud) = cloud_status::inspect(app_id, &data_root)
+            && cloud.remote_freshness != cloud_status::RemoteFreshness::Unverified
+        {
+            eprintln!(
+                "warning: Steam Cloud remote freshness for AppID {app_id}: {}. Local cache sync does not prove the latest save from another device. Resolve any Steam Cloud choice in Steam; Macroton will not choose a save version.",
+                cloud.remote_freshness.as_str()
+            );
+        }
         if !profile.cloud_files.is_empty()
             && let Ok(cloud) = cloud_status::inspect(app_id, &data_root)
             && !cloud.pending_remote_operations.is_empty()
@@ -10888,6 +11806,9 @@ fn launch_command(args: &[String]) -> Result<(), String> {
                     .display()
             );
         }
+    }
+    if result.launch_mode == macroton::profile::LaunchMode::Steam {
+        record_cloud_handoff(app_id, &data_root, &profile)?;
     }
     Ok(())
 }
@@ -11257,6 +12178,8 @@ fn print_help() {
            macroton evidence verify-independence APPID --profile PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton evidence watch-exit APPID --profile PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH] [--min-runtime-seconds N] [--timeout-seconds N] [--interval-seconds N]\n\
            macroton plan APPID --profile PATH [--steam-root PATH] [--runtime-root PATH]\n\
+           macroton play APPID [--profile PATH] [--data-root PATH] [--runtime-root PATH]\n\
+           macroton shortcut APPID [--output ABSOLUTE_PATH.command] [--profile PATH]\n\
            macroton launch APPID --profile PATH [--steam-root PATH] [--runtime-root PATH] [--data-root PATH] [--max-rss-mib N] [--hard-rss-mib N | --no-resource-guard] [--allow-ephemeral-data-root]\n\
            macroton stop APPID [--runtime-root PATH] [--data-root PATH] [--preserve-session]\n\
            macroton resource status APPID [--data-root PATH] [--max-rss-mib N] [--json]\n\
@@ -11291,6 +12214,11 @@ fn print_help() {
            macroton steam prerequisite-status APPID [--data-root PATH] [--json]\n\
            macroton steam rebind-runtime APPID --profile PATH --from-runtime-fingerprint SHA256 [--runtime-root PATH] [--data-root PATH]\n\
            macroton steam session-status [--json]\n\
+           macroton steam shared-client-status RESIDENT_APPID TARGET_APPID [--resident-profile PATH] [--target-profile PATH]\n\
+           macroton steam shared-client-install RESIDENT_APPID TARGET_APPID [--resident-profile PATH] [--target-profile PATH]\n\
+           macroton steam shared-client-launch RESIDENT_APPID TARGET_APPID [--resident-profile PATH] [--target-profile PATH]\n\
+           macroton steam shared-client-finish RESIDENT_APPID TARGET_APPID [--data-root PATH]\n\
+           macroton steam shared-client-abandon RESIDENT_APPID TARGET_APPID [--data-root PATH] [--runtime-root PATH]\n\
            macroton steam trim-client APPID --profile PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton runtime discover\n\
            macroton runtime audit ENTRYPOINT\n\
@@ -11309,6 +12237,11 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contributed_shortcut_catalog_supplies_portable_display_name() {
+        assert_eq!(shortcut_game_name(400, Path::new("compatibility/400.conf"), Some("Wrong Fallback")).unwrap(), "Portal");
+    }
 
     #[test]
     fn inventory_selection_label_preserves_combined_win32_and_2d_gate() {
@@ -13628,9 +14561,78 @@ mod tests {
 
     #[test]
     fn cloud_launch_gate_requires_no_pending_client_operations() {
-        assert!(cloud_launch_ready(cloud_status::SyncState::Synced, 0));
-        assert!(!cloud_launch_ready(cloud_status::SyncState::Synced, 1));
-        assert!(!cloud_launch_ready(cloud_status::SyncState::Syncing, 0));
+        use cloud_status::RemoteFreshness as R;
+        assert!(cloud_launch_ready(cloud_status::SyncState::Synced, 0, R::Unverified));
+        assert!(!cloud_launch_ready(cloud_status::SyncState::Synced, 1, R::Unverified));
+        assert!(!cloud_launch_ready(cloud_status::SyncState::Syncing, 0, R::Unverified));
+        assert!(!cloud_launch_ready(cloud_status::SyncState::Synced, 0, R::PendingOtherSession));
+        assert!(!cloud_launch_ready(cloud_status::SyncState::Synced, 0, R::BypassedPendingSession));
+    }
+
+    #[test]
+    fn cross_game_handoff_requires_a_post_exit_cloud_event() {
+        let mut status = cloud_status::CloudStatus {
+            app_id: 400,
+            prefix: PathBuf::new(),
+            log_path: PathBuf::new(),
+            state: cloud_status::SyncState::Synced,
+            latest_event: Some("[2026-10-06 09:58:50] [AppID 400] Successfully synced".into()),
+            pending_remote_operations: Vec::new(),
+            remote_freshness: cloud_status::RemoteFreshness::Unverified,
+            accounts: Vec::new(),
+            comparisons: Vec::new(),
+        };
+        let exit = "[2026-10-06 10:06:39] AppID 400 no longer tracking PID 956, exit code 0";
+        assert!(!cloud_handoff_ready(&status, exit));
+        status.latest_event = Some("[2026-10-06 10:06:41] [AppID 400] Upload complete, result OK".into());
+        assert!(cloud_handoff_ready(&status, exit));
+        status.remote_freshness = cloud_status::RemoteFreshness::BypassedPendingSession;
+        assert!(!cloud_handoff_ready(&status, exit));
+    }
+
+    #[test]
+    fn cloud_handoff_marker_identifies_the_exact_launched_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "macroton-cloud-handoff-marker-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("games/42")).unwrap();
+        let profile = CompatibilityProfile::parse(
+            "schema=1\nappid=42\nruntime=test\nruntime_version=1\nrenderer=auto\nexecutable=game.exe\n"
+        ).unwrap();
+        record_cloud_handoff(42, &root, &profile).unwrap();
+        assert_eq!(pending_cloud_handoff_fingerprint(42, &root).unwrap(), Some(profile.fingerprint()));
+        assert_eq!(pending_cloud_handoff_fingerprint(43, &root).unwrap(), None);
+        fs::write(cloud_handoff_marker(42, &root), "schema=1\nappid=43\nprofile_sha256=bad\n").unwrap();
+        assert!(pending_cloud_handoff_fingerprint(42, &root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_game_marker_blocks_separate_client_switch_until_cloud_finish() {
+        let root = std::env::temp_dir().join(format!(
+            "macroton-shared-marker-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let profile = CompatibilityProfile::parse(
+            "schema=1\nappid=42\nruntime=test\nruntime_version=1\nrenderer=auto\nexecutable=game.exe\n"
+        ).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        let profile_path = root.join("42.conf");
+        fs::write(&profile_path, "schema=1\nappid=42\nruntime=test\nruntime_version=1\nrenderer=auto\nexecutable=game.exe\n").unwrap();
+        record_shared_client_marker(42, 100, &root, &profile, &profile_path).unwrap();
+        assert_eq!(read_shared_client_marker(42, &root).unwrap(), Some((100, profile.fingerprint())));
+        assert_eq!(handoff_profile(42, &root, Some(&profile.fingerprint())).unwrap(), profile_path.canonicalize().unwrap());
+        assert!(record_shared_client_marker(42, 101, &root, &profile, &profile_path).is_err());
+        assert!(handoff_other_steam_clients(43, &root, Path::new("/unused"))
+            .unwrap_err().contains("shared Steam session"));
+        let lock = SharedClientLock::acquire(100, &root).unwrap();
+        assert!(SharedClientLock::acquire(101, &root).is_err());
+        drop(lock);
+        assert!(SharedClientLock::acquire(101, &root).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -13642,6 +14644,7 @@ mod tests {
             state: cloud_status::SyncState::Synced,
             latest_event: None,
             pending_remote_operations: vec!["Operation '3' from machine \"deck\"".to_owned()],
+            remote_freshness: cloud_status::RemoteFreshness::BypassedPendingSession,
             accounts: Vec::new(),
             comparisons: vec![cloud_status::CloudFileComparison {
                 account_id: "123".to_owned(),

@@ -734,6 +734,16 @@ fn repair_opted_in_steam_cef_wrapper(
             });
         }
     }
+    let real_hash = sha256::digest_file(&real).map_err(|error| Error {
+        message: format!("cannot hash Steam CEF delegate {}: {error}", real.display()),
+    })?;
+    if real_hash == sha256::digest_bytes(STEAM_CEF_WRAPPER)
+        || sha256::to_hex(&real_hash) == "bed3fcfcea0493ff8987c9eda3a2dfded9b59286e00b4f02bacb031c10f02372"
+    {
+        return Err(Error {
+            message: "Steam CEF delegate is a Macroton wrapper instead of Valve's helper; refusing a recursive CEF launch. Restore the preserved Valve helper in this idle AppID prefix before retrying".to_owned(),
+        });
+    }
     if sha256::digest_file(&helper).map_err(|error| Error {
         message: format!("cannot hash Steam CEF helper {}: {error}", helper.display()),
     })? == sha256::digest_bytes(STEAM_CEF_WRAPPER)
@@ -781,6 +791,47 @@ pub fn request_steam_install(
         plan,
         data_root,
         Some(steam_install_uri(plan.app_id)),
+        false,
+        None,
+    )
+}
+
+/// Ask an already verified resident Steam client to install another AppID.
+/// The resident plan remains the session/provenance authority; only the
+/// numeric install target changes. Callers must verify profile compatibility
+/// and Cloud handoff before using this request.
+pub fn request_steam_install_in_client(
+    resident_plan: &LaunchPlan,
+    target_app_id: u32,
+    data_root: &Path,
+) -> Result<SteamClientRequest, Error> {
+    if target_app_id == resident_plan.app_id {
+        return Err(Error { message: "shared install target must differ from resident AppID".to_owned() });
+    }
+    launch_steam_client_action(
+        resident_plan,
+        data_root,
+        Some(steam_install_uri(target_app_id)),
+        false,
+        None,
+    )
+}
+
+/// Submit a target game's ordinary Steam protocol launch to a verified
+/// resident client. Game-specific command arguments are intentionally absent:
+/// the protocol URI cannot carry them without changing their meaning.
+pub fn request_steam_game_in_client(
+    resident_plan: &LaunchPlan,
+    target_app_id: u32,
+    data_root: &Path,
+) -> Result<SteamClientRequest, Error> {
+    if target_app_id == resident_plan.app_id {
+        return Err(Error { message: "shared launch target must differ from resident AppID".to_owned() });
+    }
+    launch_steam_client_action(
+        resident_plan,
+        data_root,
+        Some(format!("steam://rungameid/{target_app_id}")),
         false,
         None,
     )
@@ -876,6 +927,10 @@ fn launch_steam_client_action(
             plan.steam_client_mode,
         );
     }
+    configure_steam_loader_trace(
+        &mut command,
+        plan.environment.get("MACROTON_STEAM_LOADER_TRACE").map(String::as_str),
+    )?;
     // Steam runs shader-precache helpers (including gldriverquery.exe) from
     // this client process.  Give those helpers the same game-directory DLL
     // search path as the later -applaunch process, so SDL2-backed probes do
@@ -1329,14 +1384,27 @@ fn configure_steam_login_command(
 ) {
     command.arg(client);
     append_steam_login_arguments(command, mode);
-    // Login/update belongs to the Steam client, not the game. Do not leak
-    // renderer selection, native game DLL overrides, overlay suppression, or
-    // other profile environment into Steam.exe. The exact prefix and client
-    // mode are the only per-session inputs it needs.
+    // Steam creates game processes from this resident client. Disable only
+    // its optional overlay DLLs here so the game inherits the override;
+    // setting it on a later -applaunch handoff is too late.
     command
         .env("WINEPREFIX", prefix)
         .env("WINEDEBUG", "-all")
+        .env("WINEDLLOVERRIDES", STEAM_OVERLAY_DLL_OVERRIDES)
         .current_dir(client_parent);
+}
+
+fn configure_steam_loader_trace(command: &mut Command, value: Option<&str>) -> Result<(), Error> {
+    match value {
+        None => Ok(()),
+        Some("1") => {
+            command.env("WINEDEBUG", "+seh,+loaddll");
+            Ok(())
+        }
+        Some(_) => Err(Error {
+            message: "MACROTON_STEAM_LOADER_TRACE must be 1 when present".to_owned(),
+        }),
+    }
 }
 
 fn configure_steam_action_command(
@@ -1354,6 +1422,7 @@ fn configure_steam_action_command(
     command
         .env("WINEPREFIX", prefix)
         .env("WINEDEBUG", "-all")
+        .env("WINEDLLOVERRIDES", STEAM_OVERLAY_DLL_OVERRIDES)
         .current_dir(client_parent);
 }
 
@@ -2897,6 +2966,18 @@ mod tests {
     }
 
     #[test]
+    fn steam_cef_repair_refuses_recursive_delegate() {
+        let temp = TempDir::new();
+        let prefix = temp.0.join("games/42/prefix");
+        let cef = prefix.join("drive_c/Program Files (x86)/Steam/bin/cef/cef.win64");
+        fs::create_dir_all(&cef).unwrap();
+        fs::write(cef.join("steamwebhelper.exe"), STEAM_CEF_WRAPPER).unwrap();
+        fs::write(cef.join("steamwebhelper_real.exe"), STEAM_CEF_WRAPPER).unwrap();
+        let error = repair_opted_in_steam_cef_wrapper(42, &temp.0, &prefix).unwrap_err();
+        assert!(error.message.contains("recursive CEF launch"));
+    }
+
+    #[test]
     fn executes_without_a_shell_and_records_the_result() {
         let temp = TempDir::new();
         let runtime = temp.0.join("fake-wine");
@@ -3076,7 +3157,7 @@ mod tests {
         let entrypoint = temp.0.join("fake-wine");
         fs::write(
             &entrypoint,
-            "#!/bin/sh\ncd /\n[ \"$1\" = reg.exe ] && exit 0\n: > \"$0.done\"\nexit 0\n",
+            "#!/bin/sh\ncd /\n[ \"$1\" = reg.exe ] && exit 0\nprintf '%s\\n' \"$@\" > \"$0.args\"\n: > \"$0.done\"\nexit 0\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&entrypoint).unwrap().permissions();
@@ -3158,6 +3239,22 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(completed.is_file(), "spawned fake runtime did not complete");
+
+        assert!(request_steam_game_in_client(&plan, 42, &data_root).is_err());
+        let shared_request = request_steam_game_in_client(&plan, 99, &data_root).unwrap();
+        assert_eq!(shared_request.profile_sha256, plan.profile_sha256);
+        let args_path = entrypoint.with_file_name("fake-wine.args");
+        let mut submitted = false;
+        for _ in 0..100 {
+            if fs::read_to_string(&args_path)
+                .is_ok_and(|args| args.lines().any(|arg| arg == "steam://rungameid/99"))
+            {
+                submitted = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(submitted, "shared request did not route the target AppID through Steam");
     }
 
     #[test]
@@ -3634,6 +3731,10 @@ mod tests {
                     std::ffi::OsStr::new("-all")
                 ),
                 (
+                    std::ffi::OsStr::new("WINEDLLOVERRIDES"),
+                    std::ffi::OsStr::new(STEAM_OVERLAY_DLL_OVERRIDES)
+                ),
+                (
                     std::ffi::OsStr::new("WINEPREFIX"),
                     std::ffi::OsStr::new("prefix")
                 )
@@ -3663,11 +3764,24 @@ mod tests {
                     std::ffi::OsStr::new("-all")
                 ),
                 (
+                    std::ffi::OsStr::new("WINEDLLOVERRIDES"),
+                    std::ffi::OsStr::new(STEAM_OVERLAY_DLL_OVERRIDES)
+                ),
+                (
                     std::ffi::OsStr::new("WINEPREFIX"),
                     std::ffi::OsStr::new("prefix")
                 )
             ]
         );
+        configure_steam_loader_trace(&mut configured_action, Some("1")).unwrap();
+        assert_eq!(
+            configured_action
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("WINEDEBUG"))
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("+seh,+loaddll"))
+        );
+        assert!(configure_steam_loader_trace(&mut configured_action, Some("+loaddll")).is_err());
     }
 
     #[test]

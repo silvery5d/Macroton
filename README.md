@@ -45,6 +45,56 @@ The repository currently contains the first vertical slice:
 
 ## Build and run
 
+Use `macroton play APPID` for the configured Steam login, install, and launch
+flow. Pending Steam confirmation does not establish whether an account owns a
+game. `macroton shortcut APPID` generates a local Finder `.command` file named
+from the portable `shortcuts/catalog.tsv` game list. See
+`shortcuts/README.md` to contribute a game name and regenerate shortcuts on
+another machine.
+
+When switching games, `play` waits for the previous game's own Steam client
+to observe game exit and a post-exit Cloud sync whose declared local files
+match its cache. It then stops only that idle AppID client while preserving its
+login and starts the new game. A pending, bypassed, failed, or unverified upload
+blocks the switch; Macroton never selects between conflicting save versions.
+If the previous Steam client died before completing sync, the pending handoff
+marker keeps the next game from silently replacing that session. This may add
+waiting time before the next game starts. A shared save directory alone cannot
+make a different AppID's Steam client upload the first game's files; Steam
+Cloud sync is tied to each game's launch and exit
+([Steamworks Cloud documentation](https://partner.steamgames.com/doc/features/cloud)).
+
+The shared-client migration starts with a read-only check:
+
+```sh
+macroton steam shared-client-status 400 26800
+```
+
+It compares the two profiles' runtime and Steam child-process settings,
+checks the resident client's exact prefix/session provenance, and checks
+whether the target is installed in that client's authenticated Steam library.
+An installed state here is not an ownership assertion for an unconfirmed
+account. A `candidate` result is a prerequisite for shared launch, not proof
+that Steam has created the target game process or a window.
+For a compatible live client, `macroton steam shared-client-install A B`
+requests B's installation inside A's authenticated Steam library after A's
+post-exit Cloud gate. Steam retains purchase and installation confirmation.
+The command does not start B or move an existing B installation or save.
+When a compatible resident client already has B installed, `macroton play B`
+submits B's normal Steam launch to that client; otherwise it asks that same
+client to install B. `macroton steam shared-client-launch A B` selects A
+explicitly. Shared launch currently requires B to have no game-specific Steam
+arguments or launcher bypass. B's launch state and Cloud files are read from
+A's prefix. Before another game starts, Macroton waits for B to exit and for
+its required Cloud upload. `macroton steam shared-client-finish A B` performs
+that check and releases B's pending marker. If no compatible client exists,
+`play` uses the guarded sequential handoff above. A shared launch request is
+not gameplay or remote freshness proof; check its status and Steam's Cloud UI.
+If Steam never created B's game process, `macroton steam shared-client-abandon A B`
+first checks both game logs and Cloud operations, stops A's client while
+preserving login, then clears the abandoned marker. It refuses a game or
+unresolved Cloud prompt.
+
 ```sh
 cargo test
 scripts/test-macos-swift-tools.sh
@@ -646,7 +696,13 @@ returns success only when every declared local file either matches Steam's
 synced raw cache hash directly, or matches decoded local remote-copy content
 whose physical hash matches the cache. A historical Cloud log line or an empty
 pending count alone is insufficient. Profiles without declared save paths fail
-closed until their mapping is researched. The only explicit exception is
+closed until their mapping is researched. This gate verifies only the local
+Steam Cloud cache. `cloud-status` reports remote freshness separately: a
+`pending-other-session` or `bypassed-pending-session` result keeps
+`launch_ready=false` even when the local cache is `synced`. Reconcile any
+save choice in Steam on the owning devices; Macroton never selects a version.
+Even an `unverified` result cannot prove that another device has no newer data.
+The only explicit exception is
 `steam_cloud=unsupported`, accompanied by `steam_cloud_source` and
 `steam_cloud_reviewed_date`, used when the reviewed official Steam feature list
 does not advertise Cloud; it omits the network roundtrip but still requires human

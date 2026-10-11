@@ -19,6 +19,23 @@ pub enum SyncState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteFreshness {
+    Unverified,
+    PendingOtherSession,
+    BypassedPendingSession,
+}
+
+impl RemoteFreshness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unverified => "unverified",
+            Self::PendingOtherSession => "pending-other-session",
+            Self::BypassedPendingSession => "bypassed-pending-session",
+        }
+    }
+}
+
 impl SyncState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -63,6 +80,9 @@ pub struct CloudStatus {
     /// launch operation. Keep that client-side signal separate from the file
     /// cache state so callers do not mistake `synced` for launch-ready.
     pub pending_remote_operations: Vec<String>,
+    /// Local cache equality cannot prove that another device has uploaded its
+    /// latest session. Steam's launch prompt is a separate authority.
+    pub remote_freshness: RemoteFreshness,
     pub accounts: Vec<AccountCache>,
     pub comparisons: Vec<CloudFileComparison>,
 }
@@ -150,9 +170,19 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub fn inspect(app_id: u32, data_root: &Path) -> Result<CloudStatus, Error> {
+    inspect_in_client(app_id, app_id, data_root)
+}
+
+/// Read an AppID's own Cloud cache and events from a verified resident Steam
+/// client. The status retains that client's prefix for save-path comparison.
+pub fn inspect_in_client(
+    app_id: u32,
+    client_app_id: u32,
+    data_root: &Path,
+) -> Result<CloudStatus, Error> {
     let prefix = data_root
         .join("games")
-        .join(app_id.to_string())
+        .join(client_app_id.to_string())
         .join("prefix");
     let steam_root = prefix
         .join("drive_c")
@@ -177,6 +207,10 @@ pub fn inspect_steam_root(app_id: u32, steam_root: &Path) -> Result<CloudStatus,
     let log_path = steam_root.join("logs/cloud_log.txt");
     let (state, latest_event) = inspect_log(app_id, &log_path)?;
     let pending_remote_operations = inspect_pending_remote_operations(app_id, &log_path)?;
+    let remote_freshness = inspect_console_remote_freshness(
+        app_id,
+        &steam_root.join("logs/console_log.txt"),
+    )?;
     Ok(CloudStatus {
         app_id,
         prefix: wine_prefix_for_steam_root(steam_root).unwrap_or_else(|| steam_root.to_path_buf()),
@@ -184,6 +218,7 @@ pub fn inspect_steam_root(app_id: u32, steam_root: &Path) -> Result<CloudStatus,
         state,
         latest_event,
         pending_remote_operations,
+        remote_freshness,
         accounts,
         comparisons: Vec::new(),
     })
@@ -235,6 +270,38 @@ pub fn inspect_pending_remote_operations(app_id: u32, path: &Path) -> Result<Vec
         }
     }
     Ok(latest)
+}
+
+fn inspect_console_remote_freshness(app_id: u32, path: &Path) -> Result<RemoteFreshness, Error> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RemoteFreshness::Unverified);
+        }
+        Err(error) => return Err(Error {
+            message: format!("cannot read Steam console log {}: {error}", path.display()),
+        }),
+    };
+    Ok(parse_console_remote_freshness(app_id, &contents))
+}
+
+fn parse_console_remote_freshness(app_id: u32, contents: &str) -> RemoteFreshness {
+    let app_marker = format!("GameAction [AppID {app_id},");
+    let mut state = RemoteFreshness::Unverified;
+    for line in contents.lines() {
+        if !line.contains(&app_marker) { continue; }
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("launchapp changed task to checkshaderdepotmanifest") {
+            state = RemoteFreshness::Unverified;
+        } else if lower.contains("waiting for user response to synchronizingcloud")
+            && lower.contains("pendingcloudsessions") {
+            state = RemoteFreshness::PendingOtherSession;
+        } else if lower.contains("continues with user response")
+            && lower.contains("ignorependingcloudsessions") {
+            state = RemoteFreshness::BypassedPendingSession;
+        }
+    }
+    state
 }
 
 pub fn compare_profile_files(
@@ -632,6 +699,20 @@ fn inspect_log(app_id: u32, path: &Path) -> Result<(SyncState, Option<String>), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_cloud_session_bypass_never_becomes_remote_freshness_proof() {
+        let log = concat!(
+            "GameAction [AppID 400, ActionID 1] : LaunchApp changed task to CheckShaderDepotManifest\n",
+            "GameAction [AppID 400, ActionID 1] : LaunchApp waiting for user response to SynchronizingCloud \"pendingcloudsessions\"\n",
+            "GameAction [AppID 400, ActionID 1] : LaunchApp continues with user response \"IgnorePendingCloudSessions\"\n",
+            "GameAction [AppID 400, ActionID 1] : LaunchApp changed task to Completed\n",
+        );
+        assert_eq!(parse_console_remote_freshness(400, log), RemoteFreshness::BypassedPendingSession);
+        assert_eq!(parse_console_remote_freshness(26800, log), RemoteFreshness::Unverified);
+        let next = format!("{log}GameAction [AppID 400, ActionID 1] : LaunchApp changed task to CheckShaderDepotManifest\n");
+        assert_eq!(parse_console_remote_freshness(400, &next), RemoteFreshness::Unverified);
+    }
     use flate2::Compression;
     use flate2::write::ZlibEncoder;
     use std::io::Write;
@@ -657,6 +738,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn shared_client_cloud_inspection_keeps_target_appid_and_resident_prefix() {
+        let temp = TempDir::new();
+        let steam = temp.0.join("games/100/prefix/drive_c/Program Files (x86)/Steam");
+        fs::create_dir_all(steam.join("logs")).unwrap();
+        fs::write(steam.join("logs/cloud_log.txt"),
+            "[2026-10-07 00:00:00] [AppID 200] Upload complete, result OK\n").unwrap();
+        let status = inspect_in_client(200, 100, &temp.0).unwrap();
+        assert_eq!(status.app_id, 200);
+        assert_eq!(status.prefix, temp.0.join("games/100/prefix"));
+        assert_eq!(status.state, SyncState::Synced);
     }
 
     #[test]

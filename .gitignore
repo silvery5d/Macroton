@@ -12,3 +12,5 @@
 *.zip
 /docs/evidence/
 /runtimes/*.local.conf
+
+/shortcuts/*.command
