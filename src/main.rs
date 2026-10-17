@@ -87,6 +87,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "scan" => scan_command(&args[1..]),
         "inspect" => inspect_command(&args[1..]),
         "inspect-pe" => inspect_pe_command(&args[1..]),
+        "profile" => profile_command(&args[1..]),
         "evidence" => evidence_command(&args[1..]),
         "plan" => plan_command(&args[1..]),
         "launch" => launch_command(&args[1..]),
@@ -10395,6 +10396,23 @@ fn inspect_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn profile_command(args: &[String]) -> Result<(), String> {
+    if args.len() != 2 || args[0] != "validate" {
+        return Err("usage: macroton profile validate PATH".to_owned());
+    }
+    let path = Path::new(&args[1]);
+    let profile = CompatibilityProfile::load(path).map_err(|error| error.to_string())?;
+    let expected_name = format!("{}.conf", profile.app_id);
+    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+        return Err(format!(
+            "profile filename must be {expected_name} for AppID {}",
+            profile.app_id
+        ));
+    }
+    println!("valid profile: AppID {} ({})", profile.app_id, path.display());
+    Ok(())
+}
+
 fn inspect_pe_command(args: &[String]) -> Result<(), String> {
     let path = args
         .first()
@@ -12162,6 +12180,7 @@ fn print_help() {
            macroton scan [--steam-root PATH] [--json]\n\
            macroton inspect PATH\n\
            macroton inspect-pe PATH [--json]\n\
+           macroton profile validate PATH\n\
            macroton evidence snapshot APPID --profile PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton evidence bundle APPID --profile PATH --focus PATH --motion PATH --interaction PATH --audio PATH --independence PATH --exit PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton evidence bundle-status APPID --profile PATH --evidence-dir PATH [--data-root PATH] [--runtime-root PATH]\n\
@@ -14712,5 +14731,20 @@ mod tests {
         assert!(scoped.contains("this AppID's existing Wine prefix"));
         assert!(scoped.contains("will not start a second client"));
         assert_eq!(format_steam_port_warning_for_scope(warning, false), warning);
+    }
+
+    #[test]
+    fn profile_validation_checks_content_and_appid_filename() {
+        let root = std::env::temp_dir().join(format!("macroton-profile-validation-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let valid = root.join("42.conf");
+        fs::write(&valid, "schema=1\nappid=42\nruntime=wine\nruntime_version=1\nrenderer=auto\nexecutable=game.exe\n").unwrap();
+        assert!(profile_command(&["validate".to_owned(), valid.display().to_string()]).is_ok());
+        let wrong_name = root.join("43.conf");
+        fs::copy(&valid, &wrong_name).unwrap();
+        assert!(profile_command(&["validate".to_owned(), wrong_name.display().to_string()]).unwrap_err().contains("filename"));
+        fs::write(&valid, "schema=1\nappid=42\nexecutable=../game.exe\n").unwrap();
+        assert!(profile_command(&["validate".to_owned(), valid.display().to_string()]).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

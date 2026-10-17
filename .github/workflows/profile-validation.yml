@@ -1,0 +1,21 @@
+name: Profile validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  profiles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Windows helper cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - name: Test parser and validate published profiles
+        run: |
+          MACROTON_STEAM_HANDOFF_RETRY_SECONDS=1 cargo test --all-targets --quiet
+          for profile in compatibility/[0-9]*.conf; do
+            case "$profile" in *.example.conf) continue ;; esac
+            cargo run --quiet -- profile validate "$profile"
+          done
