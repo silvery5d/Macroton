@@ -3,6 +3,20 @@
 Status: preparation. This repository is source code; there is no verified
 Steam-distributable macOS app bundle or Steamworks submission here yet.
 
+## Current gate — 2026-10-18
+
+The public repository now has a contributor format guide, parser validation
+for compatibility and eligibility files, a pull request template, and a
+mechanical source-only check. These checks run locally; the commits have not
+yet reached the public remote, so remote CI has not been observed.
+
+The architecture intentionally places the SwiftUI shell after a repeatable
+2D launch and evidence path. The next product gate is one eligible game with
+a verified owned Steam install, visible gameplay, input, audio, save/reload,
+Cloud policy, and stable exit on a supported Mac. Only then should the first
+app bundle wrap that proven path. The installed runtime and exact artifact
+still need license review, signing, notarization, and a clean-Mac test.
+
 ## 1. Product and license boundary
 
 - Decide the first public promise: launcher for owned Steam games with reviewed
