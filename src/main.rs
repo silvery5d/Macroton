@@ -10402,6 +10402,11 @@ fn profile_command(args: &[String]) -> Result<(), String> {
         return Err("usage: macroton profile validate PATH".to_owned());
     }
     let path = Path::new(&args[1]);
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect profile {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err("profile must be a regular, non-symlink file".to_owned());
+    }
     let profile = CompatibilityProfile::load(path).map_err(|error| error.to_string())?;
     let expected_name = format!("{}.conf", profile.app_id);
     if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
@@ -14765,6 +14770,14 @@ mod tests {
         let wrong_name = root.join("43.conf");
         fs::copy(&valid, &wrong_name).unwrap();
         assert!(profile_command(&["validate".to_owned(), wrong_name.display().to_string()]).unwrap_err().contains("filename"));
+        #[cfg(unix)]
+        {
+            let link = root.join("44.conf");
+            std::os::unix::fs::symlink(&valid, &link).unwrap();
+            assert!(profile_command(&["validate".to_owned(), link.display().to_string()])
+                .unwrap_err()
+                .contains("non-symlink"));
+        }
         fs::write(&valid, "schema=1\nappid=42\nexecutable=../game.exe\n").unwrap();
         assert!(profile_command(&["validate".to_owned(), valid.display().to_string()]).is_err());
         fs::remove_dir_all(root).unwrap();
