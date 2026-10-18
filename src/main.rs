@@ -89,6 +89,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "inspect-pe" => inspect_pe_command(&args[1..]),
         "profile" => profile_command(&args[1..]),
         "eligibility" => eligibility_command(&args[1..]),
+        "library" => library_command(&args[1..]),
+        "prepare" => prepare_command(&args[1..]),
         "evidence" => evidence_command(&args[1..]),
         "plan" => plan_command(&args[1..]),
         "launch" => launch_command(&args[1..]),
@@ -10439,6 +10441,177 @@ fn eligibility_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn library_command(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("list") {
+        return Err("usage: macroton library list [--steam-root PATH] [--profiles-dir PATH] [--data-root PATH] [--runtime-root PATH] --json".to_owned());
+    }
+    let mut steam_root = steam::default_steam_root().ok_or("HOME is not set")?;
+    let mut profiles_dir = PathBuf::from("compatibility");
+    let mut data_root = default_data_root()?;
+    let mut runtime_root = default_runtime_root()?;
+    let mut json = false;
+    let mut index = 1;
+    while index < args.len() {
+        if args[index] == "--json" {
+            json = true;
+            index += 1;
+            continue;
+        }
+        let value = args.get(index + 1).ok_or_else(|| format!("{} requires a path", args[index]))?;
+        match args[index].as_str() {
+            "--steam-root" => steam_root = PathBuf::from(value),
+            "--profiles-dir" => profiles_dir = PathBuf::from(value),
+            "--data-root" => data_root = PathBuf::from(value),
+            "--runtime-root" => runtime_root = PathBuf::from(value),
+            other => return Err(format!("unknown library option {other:?}")),
+        }
+        index += 2;
+    }
+    if !json {
+        return Err("macroton library list currently requires --json".to_owned());
+    }
+    let games = steam::scan(&steam_root).map_err(|error| error.to_string())?;
+    println!("[");
+    for (index, game) in games.iter().enumerate() {
+        let (action, stage, detail) = library_game_state(
+            game.app_id, &profiles_dir, &data_root, &runtime_root,
+        );
+        println!(
+            "  {{\"appid\":{},\"name\":\"{}\",\"action\":\"{}\",\"stage\":\"{}\",\"detail\":\"{}\"}}{}",
+            game.app_id,
+            json_escape(&game.name),
+            action,
+            stage,
+            json_escape(&detail),
+            if index + 1 == games.len() { "" } else { "," },
+        );
+    }
+    println!("]");
+    Ok(())
+}
+
+fn library_game_state(
+    app_id: u32,
+    profiles_dir: &Path,
+    data_root: &Path,
+    runtime_root: &Path,
+) -> (&'static str, &'static str, String) {
+    let profile_path = profiles_dir.join(format!("{app_id}.conf"));
+    let metadata = match fs::symlink_metadata(&profile_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound =>
+            return ("prepare", "configuration-missing", "No game configuration is available".to_owned()),
+        Err(error) => return ("prepare", "configuration-invalid", error.to_string()),
+    };
+    if !metadata.file_type().is_file() {
+        return ("prepare", "configuration-invalid", "Configuration must be a regular file".to_owned());
+    }
+    let profile = match CompatibilityProfile::load(&profile_path) {
+        Ok(profile) if profile.app_id == app_id => profile,
+        Ok(_) => return ("prepare", "configuration-invalid", "Configuration AppID does not match".to_owned()),
+        Err(error) => return ("prepare", "configuration-invalid", error.to_string()),
+    };
+    let prefix = match steam_prefix_status::inspect(app_id, data_root) {
+        Ok(prefix) => prefix,
+        Err(error) => return ("prepare", "steam-setup", error.to_string()),
+    };
+    match prefix.readiness {
+        steam_prefix_status::Readiness::NotBootstrapped =>
+            return ("prepare", "steam-setup", "Windows Steam client setup is required".to_owned()),
+        steam_prefix_status::Readiness::SignInRequired =>
+            return ("prepare", "steam-sign-in", "Steam sign-in is required".to_owned()),
+        steam_prefix_status::Readiness::StoredLoginPresent => (),
+    }
+    let install = match steam_install_status::inspect(app_id, data_root) {
+        Ok(status) => status,
+        Err(error) => return ("prepare", "windows-download", error.to_string()),
+    };
+    if install.state != steam_install_status::InstallState::Installed {
+        return ("prepare", "windows-download", format!("Windows install state: {}", install.state.as_str()));
+    }
+    let windows_games = match steam::scan(&prefix.steam_root) {
+        Ok(games) => games,
+        Err(error) => return ("prepare", "payload-unverified", error.to_string()),
+    };
+    let Some(windows_game) = windows_games.iter().find(|game| game.app_id == app_id) else {
+        return ("prepare", "payload-unverified", "Windows game manifest is missing".to_owned());
+    };
+    let plan = plan::build(windows_game, &profile, runtime_root);
+    if !plan.is_ready() {
+        return ("prepare", "launch-prerequisites", plan.blockers.join("; "));
+    }
+    ("run", "ready-to-attempt", "Windows install and configuration passed local checks".to_owned())
+}
+
+fn prepare_command(args: &[String]) -> Result<(), String> {
+    let app_id: u32 = args.first()
+        .ok_or("usage: macroton prepare APPID [--profile PATH] [--installer PATH --installer-sha256 SHA256]")?
+        .parse().map_err(|_| "APPID must be an unsigned integer")?;
+    let mut profile_path = None;
+    let mut installer = None;
+    let mut installer_sha256 = None;
+    let mut index = 1;
+    while index < args.len() {
+        let value = args.get(index + 1).ok_or_else(|| format!("{} requires a value", args[index]))?;
+        match args[index].as_str() {
+            "--profile" => profile_path = Some(PathBuf::from(value)),
+            "--installer" => installer = Some(PathBuf::from(value)),
+            "--installer-sha256" => installer_sha256 = Some(value.to_owned()),
+            other => return Err(format!("unknown prepare option {other:?}")),
+        }
+        index += 2;
+    }
+    if installer.is_some() != installer_sha256.is_some() {
+        return Err("--installer and --installer-sha256 must be provided together".to_owned());
+    }
+    let profile_path = play_profile(app_id, profile_path)?;
+    let metadata = fs::symlink_metadata(&profile_path)
+        .map_err(|error| format!("cannot inspect profile {}: {error}", profile_path.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err("profile must be a regular, non-symlink file".to_owned());
+    }
+    let profile = CompatibilityProfile::load(&profile_path).map_err(|error| error.to_string())?;
+    if profile.app_id != app_id {
+        return Err(format!("profile AppID {} does not match requested AppID {app_id}", profile.app_id));
+    }
+    if profile.launch_mode != macroton::profile::LaunchMode::Steam {
+        return Err("prepare requires a Steam launch profile".to_owned());
+    }
+    let data_root = default_data_root()?;
+    let runtime_root = default_runtime_root()?;
+    let client_plan = plan::build_steam_client(&profile, &runtime_root);
+    if !client_plan.is_ready() {
+        return Err(format!("runtime prerequisites: {}", client_plan.blockers.join("; ")));
+    }
+    let prefix = steam_prefix_status::inspect(app_id, &data_root).map_err(|error| error.to_string())?;
+    if prefix.readiness == steam_prefix_status::Readiness::NotBootstrapped {
+        let (Some(installer), Some(sha256)) = (installer, installer_sha256) else {
+            return Err(format!("Windows Steam setup is required; supply a verified Valve installer with `macroton prepare {app_id} --profile {} --installer PATH --installer-sha256 SHA256`", profile_path.display()));
+        };
+        return steam_bootstrap_command(&[
+            app_id.to_string(), "--profile".into(), profile_path.to_string_lossy().into_owned(),
+            "--installer".into(), installer.to_string_lossy().into_owned(),
+            "--installer-sha256".into(), sha256,
+        ]);
+    }
+    if prefix.readiness == steam_prefix_status::Readiness::SignInRequired {
+        return steam_login_command(&[
+            app_id.to_string(), "--profile".into(), profile_path.to_string_lossy().into_owned(),
+        ]);
+    }
+    let install = steam_install_status::inspect(app_id, &data_root).map_err(|error| error.to_string())?;
+    match install.state {
+        steam_install_status::InstallState::NotRequested => steam_install_command(&[
+            app_id.to_string(), "--profile".into(), profile_path.to_string_lossy().into_owned(),
+        ]),
+        state => {
+            println!("AppID {app_id} Windows install state: {}", state.as_str());
+            println!("Steam controls ownership, EULA, download, and installation confirmation.");
+            Ok(())
+        }
+    }
+}
+
 fn inspect_pe_command(args: &[String]) -> Result<(), String> {
     let path = args
         .first()
@@ -12208,6 +12381,8 @@ fn print_help() {
            macroton inspect-pe PATH [--json]\n\
            macroton profile validate PATH\n\
            macroton eligibility validate PATH\n\
+           macroton library list [--steam-root PATH] [--profiles-dir PATH] [--data-root PATH] [--runtime-root PATH] --json\n\
+           macroton prepare APPID [--profile PATH] [--installer PATH --installer-sha256 SHA256]\n\
            macroton evidence snapshot APPID --profile PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton evidence bundle APPID --profile PATH --focus PATH --motion PATH --interaction PATH --audio PATH --independence PATH --exit PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton evidence bundle-status APPID --profile PATH --evidence-dir PATH [--data-root PATH] [--runtime-root PATH]\n\
@@ -14800,6 +14975,19 @@ mod tests {
         let wrong_name = root.join("43.conf");
         fs::copy(&valid, &wrong_name).unwrap();
         assert!(eligibility_command(&["validate".to_owned(), wrong_name.display().to_string()]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unconfigured_game_requires_preparation_without_touching_steam() {
+        let root = std::env::temp_dir().join(format!("macroton-library-state-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let state = library_game_state(42, &root, &root, &root);
+        assert_eq!(state.0, "prepare");
+        assert_eq!(state.1, "configuration-missing");
+        assert!(prepare_command(&[
+            "42".to_owned(), "--profile".to_owned(), root.join("42.conf").display().to_string(),
+        ]).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

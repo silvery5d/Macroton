@@ -7,6 +7,8 @@
 To submit a configuration for a game, see [CONTRIBUTING.md](CONTRIBUTING.md).
 The [Steam release work plan](docs/steam-release-plan.md) tracks the remaining
 product, packaging, and Steamworks gates.
+An unsigned [macOS app preview](docs/macos-app-preview.md) now shows locally
+installed Steam games with Prepare/Run actions.
 
 Macroton is an evidence-first compatibility launcher for legacy Steam games on
 modern macOS. Its first execution path uses a Windows build of a game through a

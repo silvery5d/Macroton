@@ -17,6 +17,10 @@ Cloud policy, and stable exit on a supported Mac. Only then should the first
 app bundle wrap that proven path. The installed runtime and exact artifact
 still need license review, signing, notarization, and a clean-Mac test.
 
+An unsigned SwiftUI development preview now exercises the intended list and
+Prepare/Run states; see [macOS app preview](macos-app-preview.md). This does not
+move the repeatable-gameplay gate or establish a distributable release.
+
 ## 1. Product and license boundary
 
 - Decide the first public promise: launcher for owned Steam games with reviewed
