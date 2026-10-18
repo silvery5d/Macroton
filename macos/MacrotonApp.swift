@@ -97,7 +97,6 @@ private final class GameStore: ObservableObject {
         let profile = profiles.appendingPathComponent("\(game.appid).conf")
         if !FileManager.default.fileExists(atPath: profile.path) {
             let panel = NSOpenPanel()
-            panel.allowedContentTypes = [.plainText]
             panel.canChooseDirectories = false
             panel.message = "选择贡献者提供的 \(game.appid).conf 配置"
             guard panel.runModal() == .OK, let source = panel.url else { return }
