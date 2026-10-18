@@ -7,15 +7,20 @@ the observed state clearly in the pull request. A profile is a launch candidate,
 not a compatibility certification.
 
 1. Check that the game has a legitimate Steam AppID and that its native macOS
-   build does not already work on the target Mac. Do not submit game files,
+   build does not already work on the target Mac. Add or update
+   `eligibility/APPID.conf` with the official store URL, reviewed date, observed
+   native status, scope, and a concise evidence code. Use an existing file as
+   a format example; do not copy its conclusion to another game. Do not submit game files,
    Steam credentials, tickets, private account data, runtime binaries, or logs
    containing any of these.
 2. Copy `compatibility/123456.example.conf` to `compatibility/APPID.conf` and
    replace the values with facts observed for that game. The filename and
    `appid=` must match. Use `schema=1`.
-3. Run `cargo run -- profile validate compatibility/APPID.conf` and
+3. Run `cargo run -- profile validate compatibility/APPID.conf`,
+   `cargo run -- eligibility validate eligibility/APPID.conf`, and
    `cargo test --all-targets`. Validation checks syntax and safety constraints;
-   it does not prove the game launches or that Steam Cloud is correct.
+   it does not prove the native build is unusable, the game launches, or Steam
+   Cloud is correct.
 4. In the pull request, provide the Steam store URL, macOS version and chip,
    game build/depot identifiers if known, runtime and renderer tried, and a
    concise account of what actually happened: installation, launch, visible

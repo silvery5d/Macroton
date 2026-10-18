@@ -88,6 +88,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "inspect" => inspect_command(&args[1..]),
         "inspect-pe" => inspect_pe_command(&args[1..]),
         "profile" => profile_command(&args[1..]),
+        "eligibility" => eligibility_command(&args[1..]),
         "evidence" => evidence_command(&args[1..]),
         "plan" => plan_command(&args[1..]),
         "launch" => launch_command(&args[1..]),
@@ -10413,6 +10414,26 @@ fn profile_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn eligibility_command(args: &[String]) -> Result<(), String> {
+    if args.len() != 2 || args[0] != "validate" {
+        return Err("usage: macroton eligibility validate PATH".to_owned());
+    }
+    let path = Path::new(&args[1]);
+    let app_id = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".conf"))
+        .and_then(|name| name.parse::<u32>().ok())
+        .ok_or_else(|| "eligibility filename must be APPID.conf".to_owned())?;
+    let review = load_target_eligibility_review(path, app_id)?;
+    println!(
+        "valid eligibility: AppID {app_id}, native status {} ({})",
+        review.native_status,
+        path.display()
+    );
+    Ok(())
+}
+
 fn inspect_pe_command(args: &[String]) -> Result<(), String> {
     let path = args
         .first()
@@ -12181,6 +12202,7 @@ fn print_help() {
            macroton inspect PATH\n\
            macroton inspect-pe PATH [--json]\n\
            macroton profile validate PATH\n\
+           macroton eligibility validate PATH\n\
            macroton evidence snapshot APPID --profile PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton evidence bundle APPID --profile PATH --focus PATH --motion PATH --interaction PATH --audio PATH --independence PATH --exit PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton evidence bundle-status APPID --profile PATH --evidence-dir PATH [--data-root PATH] [--runtime-root PATH]\n\
@@ -14745,6 +14767,26 @@ mod tests {
         assert!(profile_command(&["validate".to_owned(), wrong_name.display().to_string()]).unwrap_err().contains("filename"));
         fs::write(&valid, "schema=1\nappid=42\nexecutable=../game.exe\n").unwrap();
         assert!(profile_command(&["validate".to_owned(), valid.display().to_string()]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn eligibility_validation_checks_appid_and_filename() {
+        let root = std::env::temp_dir().join(format!(
+            "macroton-eligibility-validation-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let valid = root.join("42.conf");
+        fs::write(
+            &valid,
+            "schema=1\nappid=42\nnative_status=windows-only\nsource_url=https://store.steampowered.com/app/42/Game/\nreviewed_date=2026-10-18\nevidence=store-platforms\n",
+        )
+        .unwrap();
+        assert!(eligibility_command(&["validate".to_owned(), valid.display().to_string()]).is_ok());
+        let wrong_name = root.join("43.conf");
+        fs::copy(&valid, &wrong_name).unwrap();
+        assert!(eligibility_command(&["validate".to_owned(), wrong_name.display().to_string()]).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

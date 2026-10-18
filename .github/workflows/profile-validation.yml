@@ -19,3 +19,6 @@ jobs:
             case "$profile" in *.example.conf) continue ;; esac
             cargo run --quiet -- profile validate "$profile"
           done
+          for review in eligibility/[0-9]*.conf; do
+            cargo run --quiet -- eligibility validate "$review"
+          done
