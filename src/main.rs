@@ -10470,16 +10470,23 @@ fn library_command(args: &[String]) -> Result<(), String> {
     if !json {
         return Err("macroton library list currently requires --json".to_owned());
     }
-    let games = steam::scan(&steam_root).map_err(|error| error.to_string())?;
+    let games = collect_library_entries(&steam_root, &data_root)?;
     println!("[");
-    for (index, game) in games.iter().enumerate() {
+    for (index, (app_id, (name, native, windows))) in games.iter().enumerate() {
         let (action, stage, detail) = library_game_state(
-            game.app_id, &profiles_dir, &data_root, &runtime_root,
+            *app_id, &profiles_dir, &data_root, &runtime_root,
         );
+        let source = match (*native, *windows) {
+            (true, true) => "both",
+            (true, false) => "native",
+            (false, true) => "windows",
+            (false, false) => unreachable!(),
+        };
         println!(
-            "  {{\"appid\":{},\"name\":\"{}\",\"action\":\"{}\",\"stage\":\"{}\",\"detail\":\"{}\"}}{}",
-            game.app_id,
-            json_escape(&game.name),
+            "  {{\"appid\":{},\"name\":\"{}\",\"source\":\"{}\",\"action\":\"{}\",\"stage\":\"{}\",\"detail\":\"{}\"}}{}",
+            app_id,
+            json_escape(name),
+            source,
             action,
             stage,
             json_escape(&detail),
@@ -10488,6 +10495,59 @@ fn library_command(args: &[String]) -> Result<(), String> {
     }
     println!("]");
     Ok(())
+}
+
+fn collect_library_entries(
+    native_steam_root: &Path,
+    data_root: &Path,
+) -> Result<BTreeMap<u32, (String, bool, bool)>, String> {
+    let mut games = BTreeMap::new();
+    if native_steam_root.join("steamapps").is_dir() {
+        for game in steam::scan(native_steam_root).map_err(|error| error.to_string())? {
+            games.insert(game.app_id, (game.name, true, false));
+        }
+    }
+    let games_root = data_root.join("games");
+    let entries = match fs::read_dir(&games_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(games),
+        Err(error) => return Err(format!("cannot read managed Steam games: {error}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry.file_type().map_err(|error| error.to_string())?.is_dir()
+            || entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()).is_none()
+        {
+            continue;
+        }
+        let steamapps = entry.path().join("prefix/drive_c/Program Files (x86)/Steam/steamapps");
+        let manifests = match fs::read_dir(&steamapps) {
+            Ok(manifests) => manifests,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("cannot read {}: {error}", steamapps.display())),
+        };
+        for manifest in manifests {
+            let manifest = manifest.map_err(|error| error.to_string())?;
+            let name = manifest.file_name();
+            let Some(file_name) = name.to_str() else { continue };
+            if !file_name.starts_with("appmanifest_") || !file_name.ends_with(".acf") {
+                continue;
+            }
+            if !manifest.file_type().map_err(|error| error.to_string())?.is_file() {
+                continue;
+            }
+            let metadata = steam::inspect_app_manifest(&manifest.path())
+                .map_err(|error| error.to_string())?;
+            if file_name != format!("appmanifest_{}.acf", metadata.app_id) {
+                return Err(format!("Steam manifest filename/AppID mismatch: {}", manifest.path().display()));
+            }
+            let display_name = metadata.name.unwrap_or_else(|| format!("Steam AppID {}", metadata.app_id));
+            games.entry(metadata.app_id)
+                .and_modify(|entry: &mut (String, bool, bool)| entry.2 = true)
+                .or_insert((display_name, false, true));
+        }
+    }
+    Ok(games)
 }
 
 fn library_game_state(
@@ -14988,6 +15048,25 @@ mod tests {
         assert!(prepare_command(&[
             "42".to_owned(), "--profile".to_owned(), root.join("42.conf").display().to_string(),
         ]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn library_entries_include_managed_windows_install_without_native_manifest() {
+        let root = std::env::temp_dir().join(format!("macroton-library-union-{}", std::process::id()));
+        let native = root.join("native/steamapps");
+        let managed = root.join("data/games/10/prefix/drive_c/Program Files (x86)/Steam/steamapps");
+        fs::create_dir_all(&native).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        fs::write(native.join("appmanifest_42.acf"),
+            r#""AppState" { "appid" "42" "name" "Native Name" "installdir" "Native Game" }"#).unwrap();
+        fs::write(managed.join("appmanifest_42.acf"),
+            r#""AppState" { "appid" "42" "name" "Windows Name" "installdir" "Windows Game" }"#).unwrap();
+        fs::write(managed.join("appmanifest_43.acf"),
+            r#""AppState" { "appid" "43" "name" "Windows Only" "installdir" "Windows Only" }"#).unwrap();
+        let games = collect_library_entries(&root.join("native"), &root.join("data")).unwrap();
+        assert_eq!(games.get(&42), Some(&("Native Name".to_owned(), true, true)));
+        assert_eq!(games.get(&43), Some(&("Windows Only".to_owned(), false, true)));
         fs::remove_dir_all(root).unwrap();
     }
 }

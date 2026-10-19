@@ -5,6 +5,7 @@ import SwiftUI
 private struct GameEntry: Decodable, Identifiable {
     let appid: UInt32
     let name: String
+    let source: String
     let action: String
     let stage: String
     let detail: String
@@ -173,7 +174,7 @@ private struct ContentView: View {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(game.name).font(.headline)
-                        Text("AppID \(game.appid) · \(game.detail)")
+                        Text("AppID \(game.appid) · \(game.source == "both" ? "macOS 与 Windows Steam" : game.source == "windows" ? "Windows Steam" : "macOS Steam") · \(game.detail)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()

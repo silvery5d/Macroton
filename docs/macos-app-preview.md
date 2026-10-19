@@ -8,7 +8,8 @@ sh scripts/build-macos-app.sh
 open dist/Macroton.app
 ```
 
-The app reads **locally installed** games from the native Steam library. It
+The app reads **locally installed** games from the native Steam library and
+Macroton-managed Windows Steam libraries, combining duplicate AppIDs. It
 does not read Steam credentials or claim to list every purchased game. The
 `Run` button appears only when a matching configuration, Windows Steam install,
 Windows game manifest, executable, and runtime pass the local launch plan.
