@@ -13,6 +13,10 @@ Macroton-managed Windows Steam libraries, combining duplicate AppIDs. It
 does not read Steam credentials or claim to list every purchased game. The
 `Run` button appears only when a matching configuration, Windows Steam install,
 Windows game manifest, executable, and runtime pass the local launch plan.
+For a game installed in another Macroton-managed Windows Steam library, the
+app also checks that the resident Steam client is live, its profile and runtime
+provenance match, and it is the only eligible shared client. The shared-client
+button state can change when that client exits or another one starts.
 This is readiness to attempt a launch, not a gameplay certification.
 
 `Prepare` imports a locally supplied `APPID.conf` if no configuration is

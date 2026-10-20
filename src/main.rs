@@ -10571,6 +10571,9 @@ fn library_game_state(
         Ok(_) => return ("prepare", "configuration-invalid", "Configuration AppID does not match".to_owned()),
         Err(error) => return ("prepare", "configuration-invalid", error.to_string()),
     };
+    if let Some(state) = library_shared_client_state(app_id, &profile_path, data_root, runtime_root) {
+        return state;
+    }
     let prefix = match steam_prefix_status::inspect(app_id, data_root) {
         Ok(prefix) => prefix,
         Err(error) => return ("prepare", "steam-setup", error.to_string()),
@@ -10601,6 +10604,49 @@ fn library_game_state(
         return ("prepare", "launch-prerequisites", plan.blockers.join("; "));
     }
     ("run", "ready-to-attempt", "Windows install and configuration passed local checks".to_owned())
+}
+
+fn library_shared_client_state(
+    app_id: u32, profile_path: &Path, data_root: &Path, runtime_root: &Path,
+) -> Option<(&'static str, &'static str, String)> {
+    let games_root = data_root.join("games");
+    let entries = fs::read_dir(games_root).ok()?;
+    let mut viable = Vec::new();
+    for entry in entries.flatten() {
+        let Some(owner) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else { continue };
+        if owner == app_id || !entry.path().is_dir() { continue; }
+        let Ok(resources) = stop::inspect_resources(owner, data_root) else { continue };
+        if !resources.processes.iter().any(is_primary_steam_client_process) { continue; }
+        let Ok(owner_profile) = handoff_profile(owner, data_root, None) else { continue; };
+        let request = vec![
+            owner.to_string(), app_id.to_string(),
+            "--resident-profile".into(), owner_profile.to_string_lossy().into_owned(),
+            "--target-profile".into(), profile_path.to_string_lossy().into_owned(),
+            "--data-root".into(), data_root.to_string_lossy().into_owned(),
+            "--runtime-root".into(), runtime_root.to_string_lossy().into_owned(),
+        ];
+        if let Ok(candidate) = inspect_shared_client_candidate(&request, false) {
+            if candidate.blockers.is_empty() { viable.push(candidate); }
+        }
+    }
+    if viable.len() > 1 {
+        return Some(("prepare", "shared-client-ambiguous", "Multiple live Windows Steam clients can serve this game; select one explicitly".to_owned()));
+    }
+    let candidate = viable.pop()?;
+    if !candidate.target.arguments.is_empty() || candidate.target.steam_launcher_bypass.is_some() {
+        return Some(("prepare", "launch-prerequisites", "Shared Steam launch does not support target arguments or launcher bypass".to_owned()));
+    }
+    let install = steam_install_status::inspect_steam_root(app_id, &candidate.steam_root).ok()?;
+    if install.state != steam_install_status::InstallState::Installed {
+        return Some(("prepare", "windows-download", format!("Windows install state: {}", install.state.as_str())));
+    }
+    let games = steam::scan(&candidate.steam_root).ok()?;
+    let game = games.iter().find(|game| game.app_id == app_id)?;
+    let plan = plan::build(game, &candidate.target, runtime_root);
+    if !plan.is_ready() {
+        return Some(("prepare", "launch-prerequisites", plan.blockers.join("; ")));
+    }
+    Some(("run", "shared-client-ready", format!("Windows install and configuration passed local checks in Steam client {owner}", owner = candidate.resident_id)))
 }
 
 fn prepare_command(args: &[String]) -> Result<(), String> {
@@ -15067,6 +15113,22 @@ mod tests {
         let games = collect_library_entries(&root.join("native"), &root.join("data")).unwrap();
         assert_eq!(games.get(&42), Some(&("Native Name".to_owned(), true, true)));
         assert_eq!(games.get(&43), Some(&("Windows Only".to_owned(), false, true)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_manifest_without_live_client_does_not_mark_game_runnable() {
+        let root = std::env::temp_dir().join(format!("macroton-library-shared-state-{}", std::process::id()));
+        let profiles = root.join("profiles");
+        let steamapps = root.join("data/games/10/prefix/drive_c/Program Files (x86)/Steam/steamapps");
+        fs::create_dir_all(&profiles).unwrap();
+        fs::create_dir_all(&steamapps).unwrap();
+        fs::write(profiles.join("42.conf"),
+            "schema=1\nappid=42\nruntime=test\nruntime_version=1\nrenderer=auto\nexecutable=game.exe\n").unwrap();
+        fs::write(steamapps.join("appmanifest_42.acf"),
+            r#""AppState" { "appid" "42" "name" "Shared Game" "installdir" "Shared Game" }"#).unwrap();
+        let state = library_game_state(42, &profiles, &root.join("data"), &root.join("runtime"));
+        assert_eq!(state.0, "prepare");
         fs::remove_dir_all(root).unwrap();
     }
 }
