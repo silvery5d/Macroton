@@ -10,6 +10,12 @@ open dist/Macroton.app
 
 The app reads **locally installed** games from the native Steam library and
 Macroton-managed Windows Steam libraries, combining duplicate AppIDs. It
+uses a three-pane native macOS window: a translucent category sidebar, a
+searchable local library, and selected-game details with the Prepare/Run action
+and command status. The dark gray palette and restrained borders follow the
+[StyleKit macOS Vibrancy reference](https://www.stylekit.top/zh/styles/macos-vibrancy).
+The sidebar uses `NSVisualEffectView`; the other panels use solid dark grays.
+It
 does not read Steam credentials or claim to list every purchased game. The
 `Run` button appears only when a matching configuration, Windows Steam install,
 Windows game manifest, executable, and runtime pass the local launch plan.
