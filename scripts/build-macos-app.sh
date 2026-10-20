@@ -9,12 +9,13 @@ fi
 
 cargo build --release
 app="${1:-dist/Macroton.app}"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/bin" "$app/Contents/Resources/compatibility"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/bin" "$app/Contents/Resources/compatibility" "$app/Contents/Resources/eligibility"
 cp target/release/macroton "$app/Contents/Resources/bin/macroton"
 for profile in compatibility/[0-9]*.conf; do
   case "$profile" in *.example.conf) continue ;; esac
   cp "$profile" "$app/Contents/Resources/compatibility/"
 done
+cp eligibility/[0-9]*.conf "$app/Contents/Resources/eligibility/"
 mkdir -p target/swift-module-cache/clang target/swift-module-cache/swift
 CLANG_MODULE_CACHE_PATH="$PWD/target/swift-module-cache/clang" \
 SWIFT_MODULE_CACHE_PATH="$PWD/target/swift-module-cache/swift" \

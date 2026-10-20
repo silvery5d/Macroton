@@ -50,6 +50,7 @@ private final class GameStore: ObservableObject {
     @Published var search = ""
 
     private let cli = Bundle.main.resourceURL!.appendingPathComponent("bin/macroton")
+    private let eligibility = Bundle.main.resourceURL!.appendingPathComponent("eligibility")
     private let profiles = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Macroton/profiles")
 
@@ -77,9 +78,10 @@ private final class GameStore: ObservableObject {
         let profilePath = profiles.path
         let cli = cli
         let profiles = profiles
+        let eligibility = eligibility
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let result = runCommand(cli, profiles: profiles, arguments: ["library", "list", "--profiles-dir", profilePath, "--json"])
+            let result = runCommand(cli, profiles: profiles, arguments: ["library", "list", "--profiles-dir", profilePath, "--eligibility-dir", eligibility.path, "--json"])
             let decoded = try? JSONDecoder().decode([GameEntry].self, from: Data(result.output.utf8))
             DispatchQueue.main.async {
                 self.busy = false

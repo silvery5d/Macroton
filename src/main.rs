@@ -10443,12 +10443,13 @@ fn eligibility_command(args: &[String]) -> Result<(), String> {
 
 fn library_command(args: &[String]) -> Result<(), String> {
     if args.first().map(String::as_str) != Some("list") {
-        return Err("usage: macroton library list [--steam-root PATH] [--profiles-dir PATH] [--data-root PATH] [--runtime-root PATH] --json".to_owned());
+        return Err("usage: macroton library list [--steam-root PATH] [--profiles-dir PATH] [--eligibility-dir PATH] [--data-root PATH] [--runtime-root PATH] --json".to_owned());
     }
     let mut steam_root = steam::default_steam_root().ok_or("HOME is not set")?;
     let mut profiles_dir = PathBuf::from("compatibility");
     let mut data_root = default_data_root()?;
     let mut runtime_root = default_runtime_root()?;
+    let mut eligibility_dir = None;
     let mut json = false;
     let mut index = 1;
     while index < args.len() {
@@ -10463,6 +10464,7 @@ fn library_command(args: &[String]) -> Result<(), String> {
             "--profiles-dir" => profiles_dir = PathBuf::from(value),
             "--data-root" => data_root = PathBuf::from(value),
             "--runtime-root" => runtime_root = PathBuf::from(value),
+            "--eligibility-dir" => eligibility_dir = Some(PathBuf::from(value)),
             other => return Err(format!("unknown library option {other:?}")),
         }
         index += 2;
@@ -10470,7 +10472,7 @@ fn library_command(args: &[String]) -> Result<(), String> {
     if !json {
         return Err("macroton library list currently requires --json".to_owned());
     }
-    let games = collect_library_entries(&steam_root, &data_root)?;
+    let games = collect_library_entries(&steam_root, &data_root, eligibility_dir.as_deref())?;
     println!("[");
     for (index, (app_id, (name, native, windows))) in games.iter().enumerate() {
         let (action, stage, detail) = library_game_state(
@@ -10500,10 +10502,16 @@ fn library_command(args: &[String]) -> Result<(), String> {
 fn collect_library_entries(
     native_steam_root: &Path,
     data_root: &Path,
+    eligibility_dir: Option<&Path>,
 ) -> Result<BTreeMap<u32, (String, bool, bool)>, String> {
     let mut games = BTreeMap::new();
+    let mut native_mac_ids = BTreeSet::new();
     if native_steam_root.join("steamapps").is_dir() {
         for game in steam::scan(native_steam_root).map_err(|error| error.to_string())? {
+            if game.classification == steam::Classification::NativeMac {
+                native_mac_ids.insert(game.app_id);
+                continue;
+            }
             games.insert(game.app_id, (game.name, true, false));
         }
     }
@@ -10541,11 +10549,18 @@ fn collect_library_entries(
             if file_name != format!("appmanifest_{}.acf", metadata.app_id) {
                 return Err(format!("Steam manifest filename/AppID mismatch: {}", manifest.path().display()));
             }
+            if native_mac_ids.contains(&metadata.app_id) {
+                continue;
+            }
             let display_name = metadata.name.unwrap_or_else(|| format!("Steam AppID {}", metadata.app_id));
             games.entry(metadata.app_id)
                 .and_modify(|entry: &mut (String, bool, bool)| entry.2 = true)
                 .or_insert((display_name, false, true));
         }
+    }
+    if let Some(directory) = eligibility_dir {
+        let reviews = load_inventory_eligibility_reviews(directory, games.keys().copied())?;
+        games.retain(|app_id, _| !reviews.get(app_id).is_some_and(|review| review.native_status == "working"));
     }
     Ok(games)
 }
@@ -12487,7 +12502,7 @@ fn print_help() {
            macroton inspect-pe PATH [--json]\n\
            macroton profile validate PATH\n\
            macroton eligibility validate PATH\n\
-           macroton library list [--steam-root PATH] [--profiles-dir PATH] [--data-root PATH] [--runtime-root PATH] --json\n\
+           macroton library list [--steam-root PATH] [--profiles-dir PATH] [--eligibility-dir PATH] [--data-root PATH] [--runtime-root PATH] --json\n\
            macroton prepare APPID [--profile PATH] [--installer PATH --installer-sha256 SHA256]\n\
            macroton evidence snapshot APPID --profile PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
            macroton evidence bundle APPID --profile PATH --focus PATH --motion PATH --interaction PATH --audio PATH --independence PATH --exit PATH --output ABSOLUTE_PATH [--data-root PATH] [--runtime-root PATH]\n\
@@ -15110,9 +15125,38 @@ mod tests {
             r#""AppState" { "appid" "42" "name" "Windows Name" "installdir" "Windows Game" }"#).unwrap();
         fs::write(managed.join("appmanifest_43.acf"),
             r#""AppState" { "appid" "43" "name" "Windows Only" "installdir" "Windows Only" }"#).unwrap();
-        let games = collect_library_entries(&root.join("native"), &root.join("data")).unwrap();
+        let games = collect_library_entries(&root.join("native"), &root.join("data"), None).unwrap();
         assert_eq!(games.get(&42), Some(&("Native Name".to_owned(), true, true)));
         assert_eq!(games.get(&43), Some(&("Windows Only".to_owned(), false, true)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn library_excludes_modern_native_mac_and_reviewed_working_games() {
+        let root = std::env::temp_dir().join(format!("macroton-library-native-filter-{}", std::process::id()));
+        let native = root.join("native/steamapps");
+        let managed = root.join("data/games/10/prefix/drive_c/Program Files (x86)/Steam/steamapps");
+        let eligibility = root.join("eligibility");
+        let modern = native.join("common/Modern/Modern.app/Contents/MacOS");
+        fs::create_dir_all(&modern).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        fs::create_dir_all(&eligibility).unwrap();
+        fs::write(native.join("appmanifest_42.acf"),
+            r#""AppState" { "appid" "42" "name" "Modern" "installdir" "Modern" }"#).unwrap();
+        fs::write(modern.join("Modern"),
+            [0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0]).unwrap();
+        fs::write(native.join("appmanifest_43.acf"),
+            r#""AppState" { "appid" "43" "name" "Reviewed" "installdir" "Reviewed" }"#).unwrap();
+        fs::write(native.join("appmanifest_44.acf"),
+            r#""AppState" { "appid" "44" "name" "Legacy" "installdir" "Legacy" }"#).unwrap();
+        fs::write(managed.join("appmanifest_42.acf"),
+            r#""AppState" { "appid" "42" "name" "Modern Windows" "installdir" "Modern Windows" }"#).unwrap();
+        fs::write(eligibility.join("43.conf"),
+            "schema=1\nappid=43\nnative_status=working\nsource_url=https://store.steampowered.com/app/43/Reviewed/\nreviewed_date=2026-10-20\nevidence=official-store-macos-build\n").unwrap();
+        let games = collect_library_entries(&root.join("native"), &root.join("data"), Some(&eligibility)).unwrap();
+        assert!(!games.contains_key(&42));
+        assert!(!games.contains_key(&43));
+        assert!(games.contains_key(&44));
         fs::remove_dir_all(root).unwrap();
     }
 

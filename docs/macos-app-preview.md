@@ -10,7 +10,11 @@ open dist/Macroton.app
 
 The app reads **locally installed** games from the native Steam library and
 Macroton-managed Windows Steam libraries, combining duplicate AppIDs. It
-uses a three-pane native macOS window: a translucent category sidebar, a
+omits games whose installed native executable is modern macOS Mach-O, even
+when a Windows copy is also managed. Bundled eligibility reviews also omit
+titles already marked `native_status=working` (for example Braid). This is a
+local eligibility filter, not a claim that every unreviewed game needs Macroton.
+The app uses a three-pane native macOS window: a translucent category sidebar, a
 searchable local library, and selected-game details with the Prepare/Run action
 and command status. The dark gray palette and restrained borders follow the
 [StyleKit macOS Vibrancy reference](https://www.stylekit.top/zh/styles/macos-vibrancy).
