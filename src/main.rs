@@ -13404,7 +13404,7 @@ mod tests {
     fn official_store_review_resolves_stale_metadata_but_never_overrides_working_native() {
         let braid =
             load_target_eligibility_review(Path::new("eligibility/26800.conf"), 26800).unwrap();
-        assert_eq!(braid.native_status, "working");
+        assert_eq!(braid.native_status, "legacy-unusable");
         assert!(
             braid
                 .source_url
@@ -13412,7 +13412,7 @@ mod tests {
         );
         assert_eq!(
             reviewed_native_gate("review-native-mac-viability", &braid.native_status),
-            "exclude-working-native-mac"
+            "candidate-legacy-mac-fallback"
         );
 
         let mass_effect =

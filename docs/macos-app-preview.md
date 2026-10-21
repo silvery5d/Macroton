@@ -12,7 +12,9 @@ The app reads **locally installed** games from the native Steam library and
 Macroton-managed Windows Steam libraries, combining duplicate AppIDs. It
 omits games whose installed native executable is modern macOS Mach-O, even
 when a Windows copy is also managed. Bundled eligibility reviews also omit
-titles already marked `native_status=working` (for example Braid). This is a
+titles already marked `native_status=working`. The original Braid (AppID 26800)
+has a 32-bit native build and is marked `legacy-unusable`, so it remains a
+Macroton candidate when a local Steam installation is present. This is a
 local eligibility filter, not a claim that every unreviewed game needs Macroton.
 The app uses a three-pane native macOS window: a translucent category sidebar, a
 searchable local library, and selected-game details with the Prepare/Run action

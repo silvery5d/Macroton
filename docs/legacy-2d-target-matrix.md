@@ -13,7 +13,7 @@ be recorded explicitly.
 | 606680 | Silver | SDL + OpenGL; SDL input/audio; WinMM | PE32/i386 `silver.exe`; Windows depot installed; actual interactive 3D/menu scene observed | **3D side lane; exclude from primary 2D coverage** |
 | 297000 | Heroes of Might & Magic III - HD Edition | SDL/UI renderer + legacy DirectX prerequisites; mouse/keyboard; OpenAL/WinMM | Windows-only store review; installed depots 297001/297002; exact PE32/i386 launch entrypoint verified in its isolated prefix. Genuine Launcher Play reaches the game within a 2 GiB guard using low-memory Steam mode, but the game exits code 3; `FULLSCREEN=0`, `RESOLUTION=800x600`, and a completed one-variable SDL `opengles2` control each failed to cure it | **Primary launcher/UI 2D target; gameplay unverified** |
 | 613830 | CHRONO TRIGGER | PE32/i386 Cocos2d game; GLFW/WGL OpenGL window creation, WinMM and OpenAL audio | Build 11890051 installed; Wine Devel 11.14 exposes zero WGL formats, while independent Wine Staging 11.14 exposes 720 formats with a valid selection. Steam-launched child repeatedly exits `0xC000001D` at `0x78800398`; a read-only live probe saw that address transition into private executable memory outside enumerated PE modules. No playable window observed. | **Eligible Win32 2D target; WGL gate passed with Staging, game startup still blocked; gameplay and Cloud roundtrip unverified** |
-| 26800 | Braid | SDL/OpenGL or D3D9 2D platformer | Windows depot is installed, but Steam metadata also advertises an official Mac build; native viability must fail before Windows fallback is considered | **Native-viability gate only** |
+| 26800 | Braid | SDL/OpenGL or D3D9 2D platformer | Windows depot is installed; the official Mac build is 32-bit and unusable on current macOS. The 2026-10-21 eligibility review records the owner's correction and Steam's 32-bit support cutoff. | **Eligible legacy-Mac fallback candidate; gameplay still unverified** |
 | 221380 | Age of Empires II (2013) / Retired | Isometric 2D RTS; D3D9/D3DX9, DirectSound/WinMM | Local account history includes this Windows-only title, and an earlier exploratory payload had a PE32/i386 `aok hd.exe`; the current independent AppID 221380 prefix has no installed payload or stored login. `eligibility/221380.conf` now records the reviewed Windows-only 2D scope. | **Inventory-first next candidate, not current installation or gameplay evidence; authenticate and reacquire before PE recheck** |
 | 1546570 | 仙剑奇侠传 (original) | PAL98 2D game; SDL2 audio/input | Installed Steam entrypoint `PalWorks.exe` and playable `PAL98/PAL.exe` are PE32+ x86-64; bundled `DOSBox.exe` is PE32/i386 | **Experimental Win64 2D lane; exclude from Win32 coverage** |
 | 2280 | DOOM + DOOM II | Modern source-port/3D renderer | Windows-only inventory candidate, but unsuitable for the current 2D gate | Defer |
@@ -86,21 +86,21 @@ Launcher cwd therefore remains unknown.
 These classifications were rechecked with `macroton steam target-status` on
 2026-09-26; a stored inventory/history record alone is not a current ownership
 or gameplay check.
-Braid remains documented as a native-viability control: it is 2D, but its
-eligibility review marks the official Mac build as working, so it is excluded
-from Macroton's Windows fallback candidates. Heroes III HD is selected first because the local Steam state already contains
+Braid's earlier native-viability conclusion was corrected on 2026-10-21: its
+official Mac build is 32-bit and unusable on current macOS. It remains a
+Windows fallback candidate, subject to the separate gameplay and Cloud gates.
+Heroes III HD is selected first because the local Steam state already contains
 the Windows payload and Macroton has an existing launcher-bypass path. The test
 must still distinguish reaching the launcher/menu from actual 2D gameplay and
 must not infer Steam Cloud success from local files alone.
 
-The 2026-09-26 current-state recheck confirms that `eligibility/26800.conf`
-still says `native_status=working`, and `steam target-status` therefore excludes
-Braid. This conflicts with an older validation-matrix row calling Braid
-eligible. The [current official Steam page](https://store.steampowered.com/app/26800/Braid/)
-lists only legacy OS X requirements and a 32-bit-client support cutoff, which
-raises doubt but does not override
-an existing record of user-confirmed native viability. Owner confirmation is
-pending; do not launch or count Braid as a strict target until resolved.
+The 2026-09-26 recheck had treated `native_status=working` as authoritative and
+excluded Braid. That record was incorrect. The owner confirmed the native
+32-bit limitation on 2026-10-21, consistent with the
+[official Steam page](https://store.steampowered.com/app/26800/Braid/).
+The eligibility file now says `legacy-unusable`; this resolves the conflict
+with the older validation-matrix candidate row. It does not resolve Braid's
+independent launch, Cloud, or gameplay blockers.
 For Age II, the historical exploratory PE32 result is not substituted for a
 fresh installed-payload check: the current isolated `steam install-status`
 reports `not-requested`, and the exact prefix is idle with zero processes.
