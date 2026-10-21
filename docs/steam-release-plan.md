@@ -3,23 +3,29 @@
 Status: preparation. This repository is source code; there is no verified
 Steam-distributable macOS app bundle or Steamworks submission here yet.
 
-## Current gate — 2026-10-18
+## Current gate — 2026-10-21
 
-The public repository now has a contributor format guide, parser validation
+The local public-source checkout now has a contributor format guide, parser validation
 for compatibility and eligibility files, a pull request template, and a
 mechanical source-only check. These checks run locally; the commits have not
 yet reached the public remote, so remote CI has not been observed.
 
-The architecture intentionally places the SwiftUI shell after a repeatable
-2D launch and evidence path. The next product gate is one eligible game with
+The SwiftUI development shell is available before a repeatable gameplay pass.
+The next product gate is one eligible game with
 a verified owned Steam install, visible gameplay, input, audio, save/reload,
-Cloud policy, and stable exit on a supported Mac. Only then should the first
-app bundle wrap that proven path. The installed runtime and exact artifact
-still need license review, signing, notarization, and a clean-Mac test.
+Cloud policy, and stable exit on a supported Mac. The installed runtime and
+exact release artifact still need license review, signing, notarization, and
+a clean-Mac test.
 
 An unsigned SwiftUI development preview now exercises the intended list and
 Prepare/Run states; see [macOS app preview](macos-app-preview.md). This does not
 move the repeatable-gameplay gate or establish a distributable release.
+The preview's source-reviewed [local data and privacy draft](privacy-data-flow.md)
+is ready for artifact and support-workflow review; it is not a published
+customer privacy statement. The app's native-Mac eligibility filter was
+verified with local installed-game inventory and automated tests. The rebuilt
+unsigned app has not received a fresh window-level check because launching it
+was rejected by automatic approval review pending explicit user authorization.
 
 ## 1. Product and license boundary
 
