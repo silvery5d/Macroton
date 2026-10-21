@@ -16,6 +16,9 @@ titles already marked `native_status=working`. The original Braid (AppID 26800)
 has a 32-bit native build and is marked `legacy-unusable`, so it remains a
 Macroton candidate when a local Steam installation is present. This is a
 local eligibility filter, not a claim that every unreviewed game needs Macroton.
+The app also omits reviewed `windows_entrypoint=win64-only` titles; AppID
+1546570 has a 64-bit Windows game entrypoint and is outside the current legacy
+Win32 path.
 The app uses a three-pane native macOS window: a translucent category sidebar, a
 searchable local library, and selected-game details with the Prepare/Run action
 and command status. The dark gray palette and restrained borders follow the
@@ -31,7 +34,12 @@ button state can change when that client exits or another one starts.
 This is readiness to attempt a launch, not a gameplay certification.
 
 `Prepare` imports a locally supplied `APPID.conf` if no configuration is
-available, then advances the existing Macroton/Steam flow. The first Windows
+available, then advances the existing Macroton/Steam flow. The app keeps
+profiles in `~/Library/Application Support/Macroton/profiles`; profiles bundled
+with the app are copied there on first run. There is no remote profile catalog
+yet, so a game without a bundled profile asks the user to select a contributed
+file. The picker validates both the file and its AppID before copying it.
+The first Windows
 Steam setup requires a Valve installer and an independently verified SHA-256.
 The account owner handles Steam sign-in, purchase or EULA prompts, and install
 confirmation in Steam. When signed in, `Prepare` requests the Windows version

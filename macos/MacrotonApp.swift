@@ -104,9 +104,9 @@ private final class GameStore: ObservableObject {
         if !FileManager.default.fileExists(atPath: profile.path) {
             let panel = NSOpenPanel()
             panel.canChooseDirectories = false
-            panel.message = "选择贡献者提供的 \(game.appid).conf 配置"
+            panel.message = "此游戏尚无内置配置。请选择针对 AppID \(game.appid) 的贡献者配置；导入后保存在 ~/Library/Application Support/Macroton/profiles。"
             guard panel.runModal() == .OK, let source = panel.url else { return }
-            let validation = runCommand(cli, profiles: profiles, arguments: ["profile", "validate", source.path])
+            let validation = runCommand(cli, profiles: profiles, arguments: ["profile", "validate", source.path, "--appid", String(game.appid)])
             guard validation.code == 0 else {
                 message = "配置校验失败：\(validation.output)"
                 return

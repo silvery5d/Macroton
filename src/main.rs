@@ -8499,6 +8499,7 @@ fn steam_target_status_command(args: &[String]) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetEligibilityReview {
     native_status: String,
+    windows_entrypoint: Option<String>,
     source_url: String,
     sha256: String,
     scope: Option<String>,
@@ -8539,6 +8540,7 @@ fn load_target_eligibility_review(
             "schema"
                 | "appid"
                 | "native_status"
+                | "windows_entrypoint"
                 | "source_url"
                 | "reviewed_date"
                 | "evidence"
@@ -8578,6 +8580,10 @@ fn load_target_eligibility_review(
             "unsupported eligibility native_status {native_status:?}"
         ));
     }
+    let windows_entrypoint = fields.get("windows_entrypoint").cloned();
+    if windows_entrypoint.as_deref().is_some_and(|value| value != "win64-only") {
+        return Err("unsupported eligibility windows_entrypoint; only win64-only is currently recorded".to_owned());
+    }
     let source_url = field("source_url")?;
     let expected_prefix = format!("https://store.steampowered.com/app/{app_id}/");
     if !source_url.starts_with(&expected_prefix)
@@ -8611,6 +8617,7 @@ fn load_target_eligibility_review(
     );
     Ok(TargetEligibilityReview {
         native_status: native_status.to_owned(),
+        windows_entrypoint,
         source_url: source_url.to_owned(),
         sha256,
         scope,
@@ -10400,9 +10407,12 @@ fn inspect_command(args: &[String]) -> Result<(), String> {
 }
 
 fn profile_command(args: &[String]) -> Result<(), String> {
-    if args.len() != 2 || args[0] != "validate" {
-        return Err("usage: macroton profile validate PATH".to_owned());
-    }
+    let expected_app_id = match args {
+        [command, _] if command == "validate" => None,
+        [command, _, option, value] if command == "validate" && option == "--appid" =>
+            Some(value.parse::<u32>().map_err(|_| "--appid must be an unsigned integer".to_owned())?),
+        _ => return Err("usage: macroton profile validate PATH [--appid APPID]".to_owned()),
+    };
     let path = Path::new(&args[1]);
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect profile {}: {error}", path.display()))?;
@@ -10410,6 +10420,9 @@ fn profile_command(args: &[String]) -> Result<(), String> {
         return Err("profile must be a regular, non-symlink file".to_owned());
     }
     let profile = CompatibilityProfile::load(path).map_err(|error| error.to_string())?;
+    if let Some(expected) = expected_app_id && profile.app_id != expected {
+        return Err(format!("selected profile is for AppID {}, but this game is AppID {expected}", profile.app_id));
+    }
     let expected_name = format!("{}.conf", profile.app_id);
     if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
         return Err(format!(
@@ -10518,7 +10531,15 @@ fn collect_library_entries(
     let games_root = data_root.join("games");
     let entries = match fs::read_dir(&games_root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(games),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Some(directory) = eligibility_dir {
+                let reviews = load_inventory_eligibility_reviews(directory, games.keys().copied())?;
+                games.retain(|app_id, _| !reviews.get(app_id).is_some_and(|review|
+                    review.native_status == "working"
+                        || review.windows_entrypoint.as_deref() == Some("win64-only")));
+            }
+            return Ok(games);
+        }
         Err(error) => return Err(format!("cannot read managed Steam games: {error}")),
     };
     for entry in entries {
@@ -10560,7 +10581,9 @@ fn collect_library_entries(
     }
     if let Some(directory) = eligibility_dir {
         let reviews = load_inventory_eligibility_reviews(directory, games.keys().copied())?;
-        games.retain(|app_id, _| !reviews.get(app_id).is_some_and(|review| review.native_status == "working"));
+        games.retain(|app_id, _| !reviews.get(app_id).is_some_and(|review|
+            review.native_status == "working"
+                || review.windows_entrypoint.as_deref() == Some("win64-only")));
     }
     Ok(games)
 }
@@ -12500,7 +12523,7 @@ fn print_help() {
            macroton scan [--steam-root PATH] [--json]\n\
            macroton inspect PATH\n\
            macroton inspect-pe PATH [--json]\n\
-           macroton profile validate PATH\n\
+           macroton profile validate PATH [--appid APPID]\n\
            macroton eligibility validate PATH\n\
            macroton library list [--steam-root PATH] [--profiles-dir PATH] [--eligibility-dir PATH] [--data-root PATH] [--runtime-root PATH] --json\n\
            macroton prepare APPID [--profile PATH] [--installer PATH --installer-sha256 SHA256]\n\
@@ -13321,6 +13344,7 @@ mod tests {
         assert!(!review_scope_allows_2d(None));
         let mut review = TargetEligibilityReview {
             native_status: "windows-only".to_owned(),
+            windows_entrypoint: None,
             source_url: "https://store.steampowered.com/app/42/Fixture/".to_owned(),
             sha256: "a".repeat(64),
             scope: None,
@@ -13359,6 +13383,7 @@ mod tests {
         };
         let mut review = TargetEligibilityReview {
             native_status: "legacy-unusable".to_owned(),
+            windows_entrypoint: None,
             source_url: "https://store.steampowered.com/app/42/Fixture/".to_owned(),
             sha256: "a".repeat(64),
             scope: None,
@@ -13443,6 +13468,9 @@ mod tests {
         assert_eq!(reviews[&606680].scope.as_deref(), Some("3d"));
         assert!(!review_scope_allows_2d(reviews.get(&606680)));
         assert!(!reviews.contains_key(&999_999));
+        let sword_and_fairy = load_target_eligibility_review(
+            Path::new("eligibility/1546570.conf"), 1546570).unwrap();
+        assert_eq!(sword_and_fairy.windows_entrypoint.as_deref(), Some("win64-only"));
     }
 
     #[test]
@@ -13931,6 +13959,7 @@ mod tests {
             Some("candidate-windows-only"),
             Some(&TargetEligibilityReview {
                 native_status: "windows-only".to_owned(),
+                windows_entrypoint: None,
                 source_url: "https://store.steampowered.com/app/42/Fixture/".to_owned(),
                 sha256: "a".repeat(64),
                 scope: None,
@@ -15063,6 +15092,9 @@ mod tests {
         let valid = root.join("42.conf");
         fs::write(&valid, "schema=1\nappid=42\nruntime=wine\nruntime_version=1\nrenderer=auto\nexecutable=game.exe\n").unwrap();
         assert!(profile_command(&["validate".to_owned(), valid.display().to_string()]).is_ok());
+        assert!(profile_command(&["validate".to_owned(), valid.display().to_string(), "--appid".to_owned(), "42".to_owned()]).is_ok());
+        assert!(profile_command(&["validate".to_owned(), valid.display().to_string(), "--appid".to_owned(), "1546570".to_owned()])
+            .unwrap_err().contains("this game is AppID 1546570"));
         let wrong_name = root.join("43.conf");
         fs::copy(&valid, &wrong_name).unwrap();
         assert!(profile_command(&["validate".to_owned(), wrong_name.display().to_string()]).unwrap_err().contains("filename"));
@@ -15132,7 +15164,7 @@ mod tests {
     }
 
     #[test]
-    fn library_excludes_modern_native_mac_and_reviewed_working_games() {
+    fn library_excludes_modern_native_mac_working_and_win64_only_games() {
         let root = std::env::temp_dir().join(format!("macroton-library-native-filter-{}", std::process::id()));
         let native = root.join("native/steamapps");
         let managed = root.join("data/games/10/prefix/drive_c/Program Files (x86)/Steam/steamapps");
@@ -15151,12 +15183,19 @@ mod tests {
             r#""AppState" { "appid" "44" "name" "Legacy" "installdir" "Legacy" }"#).unwrap();
         fs::write(managed.join("appmanifest_42.acf"),
             r#""AppState" { "appid" "42" "name" "Modern Windows" "installdir" "Modern Windows" }"#).unwrap();
+        fs::write(managed.join("appmanifest_45.acf"),
+            r#""AppState" { "appid" "45" "name" "Win64 Only" "installdir" "Win64 Only" }"#).unwrap();
         fs::write(eligibility.join("43.conf"),
             "schema=1\nappid=43\nnative_status=working\nsource_url=https://store.steampowered.com/app/43/Reviewed/\nreviewed_date=2026-10-20\nevidence=official-store-macos-build\n").unwrap();
+        fs::write(eligibility.join("45.conf"),
+            "schema=1\nappid=45\nnative_status=windows-only\nwindows_entrypoint=win64-only\nsource_url=https://store.steampowered.com/app/45/Win64/\nreviewed_date=2026-10-22\nevidence=installed-entrypoint-pe32plus\n").unwrap();
         let games = collect_library_entries(&root.join("native"), &root.join("data"), Some(&eligibility)).unwrap();
         assert!(!games.contains_key(&42));
         assert!(!games.contains_key(&43));
+        assert!(!games.contains_key(&45));
         assert!(games.contains_key(&44));
+        let without_managed = collect_library_entries(&root.join("native"), &root.join("absent"), Some(&eligibility)).unwrap();
+        assert!(!without_managed.contains_key(&43));
         fs::remove_dir_all(root).unwrap();
     }
 
