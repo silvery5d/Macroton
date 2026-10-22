@@ -29,6 +29,9 @@ was rejected by automatic approval review pending explicit user authorization.
 
 ## 1. Product and license boundary
 
+- Include owned Steam games that have no Mac version and games whose Mac version
+  only supports 32-bit execution on current macOS. Windows executable bitness
+  affects runtime readiness, not whether the game belongs in the library.
 - Decide the first public promise: launcher for owned Steam games with reviewed
   configurations, plus clearly labeled experimental profiles. Keep game
   ownership checks and game files under Steam's control.

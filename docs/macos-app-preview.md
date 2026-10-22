@@ -16,9 +16,10 @@ titles already marked `native_status=working`. The original Braid (AppID 26800)
 has a 32-bit native build and is marked `legacy-unusable`, so it remains a
 Macroton candidate when a local Steam installation is present. This is a
 local eligibility filter, not a claim that every unreviewed game needs Macroton.
-The app also omits reviewed `windows_entrypoint=win64-only` titles; AppID
-1546570 has a 64-bit Windows game entrypoint and is outside the current legacy
-Win32 path.
+AppID 1546570 is displayed as "仙剑奇侠传" using the reviewed `display_name`.
+Windows-only titles remain in the library regardless of whether their Windows
+entrypoint is 32-bit or 64-bit. The local Steam installation name is retained
+as source metadata and is not rewritten.
 The app uses a three-pane native macOS window: a translucent category sidebar, a
 searchable local library, and selected-game details with the Prepare/Run action
 and command status. The dark gray palette and restrained borders follow the

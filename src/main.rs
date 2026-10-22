@@ -8499,7 +8499,7 @@ fn steam_target_status_command(args: &[String]) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetEligibilityReview {
     native_status: String,
-    windows_entrypoint: Option<String>,
+    display_name: Option<String>,
     source_url: String,
     sha256: String,
     scope: Option<String>,
@@ -8540,7 +8540,7 @@ fn load_target_eligibility_review(
             "schema"
                 | "appid"
                 | "native_status"
-                | "windows_entrypoint"
+                | "display_name"
                 | "source_url"
                 | "reviewed_date"
                 | "evidence"
@@ -8580,9 +8580,11 @@ fn load_target_eligibility_review(
             "unsupported eligibility native_status {native_status:?}"
         ));
     }
-    let windows_entrypoint = fields.get("windows_entrypoint").cloned();
-    if windows_entrypoint.as_deref().is_some_and(|value| value != "win64-only") {
-        return Err("unsupported eligibility windows_entrypoint; only win64-only is currently recorded".to_owned());
+    let display_name = fields.get("display_name").cloned();
+    if display_name.as_deref().is_some_and(|name|
+        name.trim() != name || name.chars().any(char::is_control) || name.chars().count() > 80)
+    {
+        return Err("eligibility display_name must be a single, trimmed name of at most 80 characters".to_owned());
     }
     let source_url = field("source_url")?;
     let expected_prefix = format!("https://store.steampowered.com/app/{app_id}/");
@@ -8617,7 +8619,7 @@ fn load_target_eligibility_review(
     );
     Ok(TargetEligibilityReview {
         native_status: native_status.to_owned(),
-        windows_entrypoint,
+        display_name,
         source_url: source_url.to_owned(),
         sha256,
         scope,
@@ -10486,11 +10488,15 @@ fn library_command(args: &[String]) -> Result<(), String> {
         return Err("macroton library list currently requires --json".to_owned());
     }
     let games = collect_library_entries(&steam_root, &data_root, eligibility_dir.as_deref())?;
+    let reviews = eligibility_dir.as_deref()
+        .map(|directory| load_inventory_eligibility_reviews(directory, games.keys().copied()))
+        .transpose()?
+        .unwrap_or_default();
     println!("[");
     for (index, (app_id, (name, native, windows))) in games.iter().enumerate() {
-        let (action, stage, detail) = library_game_state(
-            *app_id, &profiles_dir, &data_root, &runtime_root,
-        );
+        let review = reviews.get(app_id);
+        let (action, stage, detail) = library_game_state(*app_id, &profiles_dir, &data_root, &runtime_root);
+        let display_name = review.and_then(|item| item.display_name.as_deref()).unwrap_or(name);
         let source = match (*native, *windows) {
             (true, true) => "both",
             (true, false) => "native",
@@ -10500,7 +10506,7 @@ fn library_command(args: &[String]) -> Result<(), String> {
         println!(
             "  {{\"appid\":{},\"name\":\"{}\",\"source\":\"{}\",\"action\":\"{}\",\"stage\":\"{}\",\"detail\":\"{}\"}}{}",
             app_id,
-            json_escape(name),
+            json_escape(display_name),
             source,
             action,
             stage,
@@ -10535,8 +10541,7 @@ fn collect_library_entries(
             if let Some(directory) = eligibility_dir {
                 let reviews = load_inventory_eligibility_reviews(directory, games.keys().copied())?;
                 games.retain(|app_id, _| !reviews.get(app_id).is_some_and(|review|
-                    review.native_status == "working"
-                        || review.windows_entrypoint.as_deref() == Some("win64-only")));
+                    review.native_status == "working"));
             }
             return Ok(games);
         }
@@ -10582,8 +10587,7 @@ fn collect_library_entries(
     if let Some(directory) = eligibility_dir {
         let reviews = load_inventory_eligibility_reviews(directory, games.keys().copied())?;
         games.retain(|app_id, _| !reviews.get(app_id).is_some_and(|review|
-            review.native_status == "working"
-                || review.windows_entrypoint.as_deref() == Some("win64-only")));
+            review.native_status == "working"));
     }
     Ok(games)
 }
@@ -13344,7 +13348,7 @@ mod tests {
         assert!(!review_scope_allows_2d(None));
         let mut review = TargetEligibilityReview {
             native_status: "windows-only".to_owned(),
-            windows_entrypoint: None,
+            display_name: None,
             source_url: "https://store.steampowered.com/app/42/Fixture/".to_owned(),
             sha256: "a".repeat(64),
             scope: None,
@@ -13383,7 +13387,7 @@ mod tests {
         };
         let mut review = TargetEligibilityReview {
             native_status: "legacy-unusable".to_owned(),
-            windows_entrypoint: None,
+            display_name: None,
             source_url: "https://store.steampowered.com/app/42/Fixture/".to_owned(),
             sha256: "a".repeat(64),
             scope: None,
@@ -13470,7 +13474,7 @@ mod tests {
         assert!(!reviews.contains_key(&999_999));
         let sword_and_fairy = load_target_eligibility_review(
             Path::new("eligibility/1546570.conf"), 1546570).unwrap();
-        assert_eq!(sword_and_fairy.windows_entrypoint.as_deref(), Some("win64-only"));
+        assert_eq!(sword_and_fairy.display_name.as_deref(), Some("仙剑奇侠传"));
     }
 
     #[test]
@@ -13959,7 +13963,7 @@ mod tests {
             Some("candidate-windows-only"),
             Some(&TargetEligibilityReview {
                 native_status: "windows-only".to_owned(),
-                windows_entrypoint: None,
+                display_name: None,
                 source_url: "https://store.steampowered.com/app/42/Fixture/".to_owned(),
                 sha256: "a".repeat(64),
                 scope: None,
@@ -15164,7 +15168,7 @@ mod tests {
     }
 
     #[test]
-    fn library_excludes_modern_native_mac_working_and_win64_only_games() {
+    fn library_keeps_reviewed_windows_only_games_visible() {
         let root = std::env::temp_dir().join(format!("macroton-library-native-filter-{}", std::process::id()));
         let native = root.join("native/steamapps");
         let managed = root.join("data/games/10/prefix/drive_c/Program Files (x86)/Steam/steamapps");
@@ -15188,11 +15192,11 @@ mod tests {
         fs::write(eligibility.join("43.conf"),
             "schema=1\nappid=43\nnative_status=working\nsource_url=https://store.steampowered.com/app/43/Reviewed/\nreviewed_date=2026-10-20\nevidence=official-store-macos-build\n").unwrap();
         fs::write(eligibility.join("45.conf"),
-            "schema=1\nappid=45\nnative_status=windows-only\nwindows_entrypoint=win64-only\nsource_url=https://store.steampowered.com/app/45/Win64/\nreviewed_date=2026-10-22\nevidence=installed-entrypoint-pe32plus\n").unwrap();
+            "schema=1\nappid=45\ndisplay_name=测试游戏\nnative_status=windows-only\nsource_url=https://store.steampowered.com/app/45/Win64/\nreviewed_date=2026-10-22\nevidence=installed-entrypoint-pe32plus\n").unwrap();
         let games = collect_library_entries(&root.join("native"), &root.join("data"), Some(&eligibility)).unwrap();
         assert!(!games.contains_key(&42));
         assert!(!games.contains_key(&43));
-        assert!(!games.contains_key(&45));
+        assert!(games.contains_key(&45));
         assert!(games.contains_key(&44));
         let without_managed = collect_library_entries(&root.join("native"), &root.join("absent"), Some(&eligibility)).unwrap();
         assert!(!without_managed.contains_key(&43));

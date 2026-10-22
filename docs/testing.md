@@ -3,10 +3,20 @@
 Macroton uses four evidence levels. Passing a lower level never implies a
 higher one.
 
-## Candidate eligibility gate
+## Product scope and current Win32 validation gate
+
+Macroton's product scope includes Steam games with no macOS version and games
+whose official Mac version is 32-bit-only on current macOS. A 64-bit Windows
+game is still in scope. Windows executable architecture determines which
+runtime and configuration work is needed; it is not a reason to remove the
+game from the library. A missing profile means that work has not yet been
+contributed or reviewed, and a profile for another AppID cannot substitute.
+
+The stricter gate below selects games for the **current legacy Win32/2D
+validation lane**. It must not be presented as the complete product scope.
 
 Before downloading a Windows depot, verify the game actually needs Macroton on
-the target macOS release. A candidate is eligible only when all of these are
+the target macOS release. A candidate for this validation lane is eligible only when all of these are
 true:
 
 1. the account owns the Steam game;

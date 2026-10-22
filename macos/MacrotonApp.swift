@@ -96,6 +96,7 @@ private final class GameStore: ObservableObject {
     }
 
     func prepare(_ game: GameEntry) {
+        guard game.action == "prepare" else { return }
         if game.stage == "configuration-invalid" {
             message = "配置需要修正：\(game.detail)"
             return
@@ -209,7 +210,7 @@ private struct ContentView: View {
             switch store.filter {
             case .all: matchesFilter = true
             case .ready: matchesFilter = game.action == "run"
-            case .prepare: matchesFilter = game.action != "run"
+            case .prepare: matchesFilter = game.action == "prepare"
             }
             return matchesFilter && (store.search.isEmpty || game.name.localizedCaseInsensitiveContains(store.search)
                                      || String(game.appid).contains(store.search))
@@ -296,7 +297,7 @@ private struct ContentView: View {
         switch item {
         case .all: return store.games.count
         case .ready: return store.games.filter { $0.action == "run" }.count
-        case .prepare: return store.games.filter { $0.action != "run" }.count
+        case .prepare: return store.games.filter { $0.action == "prepare" }.count
         }
     }
 

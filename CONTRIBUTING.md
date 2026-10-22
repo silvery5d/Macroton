@@ -13,10 +13,8 @@ not a compatibility certification.
    a format example; do not copy its conclusion to another game. Do not submit game files,
    Steam credentials, tickets, private account data, runtime binaries, or logs
    containing any of these.
-   If the inspected Windows game entrypoint is exclusively 64-bit, record
-   `windows_entrypoint=win64-only`; the app omits that title from its current
-   legacy Win32 preparation list. This negative review does not certify other
-   games as Win32 compatible. Do not set it from a bundled helper executable.
+   An optional `display_name` gives a reviewed local-language title in the
+   Macroton library; it changes neither Steam metadata nor compatibility.
 2. Copy `compatibility/123456.example.conf` to `compatibility/APPID.conf` and
    replace the values with facts observed for that game. The filename and
    `appid=` must match. Use `schema=1`.
